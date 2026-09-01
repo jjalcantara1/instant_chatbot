@@ -40,76 +40,86 @@ interface Source { n: number; url: string; title: string; headingPath: string }
     :host, * { box-sizing: border-box; }
     :host {
       all: initial;
-      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      font-family: Archivo, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
       font-size: 14px;
       line-height: 1.5;
+      /* It sits on someone else's page, so the panel is white, not warm paper. */
       --bg: #ffffff;
-      --fg: #14181f;
-      --muted: #5c6873;
-      --rule: #d5dce2;
-      --accent: #1b44d8;
-      --card: #f4f6f8;
+      --paper: #F7F5F1;
+      --fg: #17150F;
+      --muted: #6B665C;
+      --rule: #DCD7CD;
+      --accent: #5B2A86;
+      --card: #FDFCFA;
     }
     @media (prefers-color-scheme: dark) {
       :host {
-        --bg: #161c24; --fg: #e6ecf2; --muted: #9aa7b3;
-        --rule: #2c3742; --accent: #8aa4ff; --card: #1e262f;
+        --bg: #161c24; --paper: #161c24; --fg: #e6ecf2; --muted: #9aa7b3;
+        --rule: #2c3742; --accent: #b79ce0; --card: #1e262f;
       }
     }
-    .wrap { position: fixed; bottom: 16px; right: 16px; display: flex; flex-direction: column;
-            align-items: flex-end; gap: 10px; }
+    .wrap { position: fixed; bottom: 24px; right: 24px; display: flex; flex-direction: column;
+            align-items: flex-end; gap: 12px; }
     button { font: inherit; cursor: pointer; }
 
+    /* The launcher circle is the only radius anywhere in the design. */
     .launcher {
-      width: 52px; height: 52px; border-radius: 50%; border: 1px solid var(--rule);
-      background: var(--bg); color: var(--fg); display: grid; place-items: center;
-      box-shadow: 0 4px 14px rgba(0,0,0,.14);
+      width: 52px; height: 52px; border-radius: 50%; border: 1px solid var(--fg);
+      background: var(--paper); color: var(--accent); display: grid; place-items: center;
     }
     .launcher:hover { border-color: var(--accent); color: var(--accent); }
 
     .panel {
       width: min(370px, calc(100vw - 32px));
-      height: min(520px, calc(100vh - 110px));
+      height: min(480px, calc(100vh - 110px));
       background: var(--bg); color: var(--fg);
-      border: 1px solid var(--rule); border-radius: 10px;
-      box-shadow: 0 12px 40px rgba(0,0,0,.18);
+      border: 1px solid var(--fg); border-radius: 0;
       display: flex; flex-direction: column; overflow: hidden;
     }
     .panel[hidden] { display: none; }
 
-    header { padding: 10px 12px; border-bottom: 1px solid var(--rule);
-             display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-    .title { font-size: 13px; font-weight: 600; }
-    .sub { font-size: 11px; color: var(--muted); }
-    .x { background: none; border: 0; color: var(--muted); font-size: 20px; line-height: 1; padding: 2px 6px; }
-    .x:hover { color: var(--fg); }
+    header { padding: 13px 15px; border-bottom: 1px solid var(--rule);
+             display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+    .title { font-size: 13.5px; font-weight: 600; }
+    .sub { margin-top: 3px; font-size: 11px; color: var(--muted); }
+    .x { background: none; border: 0; color: var(--muted); font-size: 17px; line-height: 1; padding: 2px 6px; }
+    .x:hover { color: var(--accent); }
 
-    .log { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 12px; }
-    .msg-user { align-self: flex-end; background: var(--accent); color: #fff;
-                padding: 7px 11px; border-radius: 12px 12px 2px 12px; max-width: 85%; }
-    .msg-bot { max-width: 92%; white-space: pre-wrap; }
-    .err { color: #b23c26; font-size: 13px; }
+    .log { flex: 1; overflow-y: auto; padding: 15px; display: flex; flex-direction: column; gap: 10px; }
+    /* The question is plain text, not a reversed-out bubble. */
+    .msg-user { font-size: 12.5px; color: var(--muted); margin-top: 6px; }
+    .msg-user:first-child { margin-top: 0; }
+    .msg-bot { font-size: 14.5px; line-height: 1.6; white-space: pre-wrap; text-wrap: pretty; }
+    .err { color: #9B2C1E; font-size: 13px; }
     .empty { color: var(--muted); font-size: 13px; }
 
-    .chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
-    .chip { font-size: 11px; border: 1px solid var(--rule); border-radius: 4px;
-            padding: 2px 6px; color: var(--muted); text-decoration: none; }
-    .chip:hover { border-color: var(--accent); color: var(--accent); }
-    sup { color: var(--accent); font-size: 10px; }
+    /* Sources are footnote rows under a hairline, not bordered chips. */
+    .notes { margin-top: 16px; border-top: 1px solid var(--rule); padding-top: 10px;
+             display: flex; flex-direction: column; gap: 8px; }
+    .note { display: flex; gap: 10px; align-items: baseline; }
+    .note-n { font-family: ui-monospace, Menlo, monospace; font-size: 10.5px; color: var(--accent); }
+    .note-a { font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; color: var(--fg);
+              text-decoration: underline; text-decoration-color: var(--accent);
+              text-underline-offset: 3px; overflow: hidden; text-overflow: ellipsis;
+              white-space: nowrap; min-width: 0; }
+    sup { color: var(--accent); font-size: 10px; top: -0.8em; position: relative; }
 
-    form { border-top: 1px solid var(--rule); padding: 9px; display: flex; gap: 7px; }
-    input { flex: 1; font: inherit; padding: 8px 10px; border: 1px solid var(--rule);
-            border-radius: 6px; background: var(--card); color: var(--fg); min-width: 0; }
+    form { padding: 0 15px 14px; }
+    .field { border-top: 1px solid var(--rule); padding-top: 12px; display: flex;
+             align-items: flex-end; justify-content: space-between; gap: 14px; }
+    input { flex: 1; font: inherit; font-size: 14.5px; line-height: 1; min-width: 0;
+            background: transparent; color: var(--fg);
+            border: 0; border-bottom: 2px solid var(--fg); padding: 0 0 8px; }
     input:disabled { opacity: .6; }
-    .send { border: 1px solid var(--rule); border-radius: 6px; background: var(--card);
-            color: var(--fg); padding: 8px 12px; }
+    .send { border: 0; border-bottom: 2px solid var(--accent); background: transparent;
+            color: var(--accent); font-size: 13.5px; font-weight: 500; padding: 0 0 8px; }
     .send:disabled { opacity: .4; cursor: default; }
-    :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
     .notice { padding: 20px 16px; text-align: center; color: var(--muted); font-size: 13px; }
     .notice a { color: var(--accent); }
 
-    @keyframes pop { from { opacity: 0; transform: translateY(6px); } }
+    @keyframes pop { from { opacity: 0; } }
     .panel:not([hidden]) { animation: pop .14s ease-out; }
     @media (prefers-reduced-motion: reduce) { .panel:not([hidden]) { animation: none; } }
   `;
@@ -130,8 +140,10 @@ interface Source { n: number; url: string; title: string; headingPath: string }
         <div class="empty">Ask a question about this site.</div>
       </div>
       <form>
-        <input type="text" placeholder="Ask something" aria-label="Ask about this site" maxlength="1000" />
-        <button class="send" type="submit">Ask</button>
+        <div class="field">
+          <input type="text" placeholder="Ask something" aria-label="Ask about this site" maxlength="1000" />
+          <button class="send" type="submit">ask</button>
+        </div>
       </form>
     </div>
     <button class="launcher" aria-label="Open chat" aria-expanded="false">
@@ -252,18 +264,22 @@ interface Source { n: number; url: string; title: string; headingPath: string }
         } else if (event === 'sources') {
           const sources = (payload as { sources: Source[] }).sources;
           if (sources.length === 0) return;
-          const chips = el('div', 'chips');
+          const notes = el('div', 'notes');
           for (const s of sources) {
-            const a = el('a', 'chip') as HTMLAnchorElement;
+            const row = el('div', 'note');
+            row.appendChild(el('span', 'note-n', String(s.n)));
+            const a = el('a', 'note-a') as HTMLAnchorElement;
             a.href = s.url;
             a.target = '_blank';
             a.rel = 'noopener noreferrer';
             a.title = s.title;
-            try { a.textContent = new URL(s.url).pathname || '/'; }
-            catch { a.textContent = s.url; }
-            chips.appendChild(a);
+            let path = s.url;
+            try { path = new URL(s.url).pathname || '/'; } catch { /* keep the raw url */ }
+            a.textContent = `${path} ↗`;
+            row.appendChild(a);
+            notes.appendChild(row);
           }
-          bot.appendChild(chips);
+          bot.appendChild(notes);
           scroll();
         } else if (event === 'error') {
           const e = el('div', 'err', (payload as { message: string }).message);

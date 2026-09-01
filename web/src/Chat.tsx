@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { sendMessage, type AnswerStage, type PageEvent, type SessionDetail, type Source } from './api';
 
 interface Turn {
@@ -8,7 +8,25 @@ interface Turn {
   error?: string;
 }
 
-/** Renders [1] citation markers as superscript references rather than raw text. */
+function shortPath(url: string): string {
+  try {
+    const u = new URL(url);
+    return u.pathname === '/' ? '/' : u.pathname.replace(/\/$/, '');
+  } catch { return url; }
+}
+
+/**
+ * Page titles are written for search engines. Strip the brand tail and the
+ * descriptive half so a suggestion reads like something a person would ask.
+ */
+function cleanTitle(title: string): string {
+  const head = title.split(/\s+[|–—·]\s+/)[0]?.trim() ?? title.trim();
+  const kept = head.length >= 3 ? head : title.trim();
+  const lead = (kept.split(/:\s+/)[0] ?? kept).trim();
+  return lead.length >= 3 ? lead : kept;
+}
+
+/** Renders [1] citation markers as footnote references rather than raw text. */
 function AnswerText({ text }: { text: string }): React.ReactElement {
   const parts = text.split(/(\[\d{1,2}\])/g);
   return (
@@ -17,12 +35,50 @@ function AnswerText({ text }: { text: string }): React.ReactElement {
         const m = /^\[(\d{1,2})\]$/.exec(part);
         if (!m) return <span key={i}>{part}</span>;
         return (
-          <sup key={i} className="font-mono text-[11px] text-[var(--signal)] px-[1px]">
+          <sup key={i} className="font-mono text-[11px] text-[var(--accent)] relative top-[-0.8em]">
             {m[1]}
           </sup>
         );
       })}
     </>
+  );
+}
+
+/** Sources are footnotes under a rule, not chips beside the answer. */
+function Footnotes({ sources }: { sources: Source[] }): React.ReactElement {
+  return (
+    <div className="mt-5 md:mt-7 border-t rule pt-3 max-w-[640px] flex flex-col gap-3">
+      {sources.map((s) => (
+        <div key={s.url} className="flex items-baseline gap-3 md:gap-[14px]">
+          <span className="font-mono text-[11px] text-[var(--accent)] pt-0.5">{s.n}</span>
+          <div className="min-w-0">
+            <a
+              href={s.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="link-path font-mono text-[12px] md:text-[12.5px] block truncate"
+            >
+              {shortPath(s.url)} ↗
+            </a>
+            {s.title && (
+              <div className="mt-1 text-[12px] text-[var(--muted)] truncate md:whitespace-normal">
+                {s.title}
+              </div>
+            )}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function Thinking({ stage }: { stage: AnswerStage | null }): React.ReactElement {
+  const label = stage === 'generating' ? 'writing an answer' : 'searching the indexed pages';
+  return (
+    <p className="text-[14px] text-[var(--muted)] flex items-center gap-1.5" role="status" aria-live="polite">
+      <span>{label}<span className="dots" aria-hidden="true" /></span>
+      <span className="caret h-[14px]" aria-hidden="true" />
+    </p>
   );
 }
 
@@ -44,81 +100,65 @@ function EmbedSnippet({ sessionId, widgetOrigin }: { sessionId: string; widgetOr
   };
 
   return (
-    <div className="mt-4">
-      <div className="font-mono text-[12px] text-[var(--muted)] mb-1">put this on your site</div>
-      <pre className="font-mono text-[11px] leading-relaxed bg-[var(--card)] border rule p-2 overflow-x-auto whitespace-pre-wrap break-all">
+    <>
+      <div className="border-t rule pt-4 text-[12px] text-[var(--muted)]">put this on your site</div>
+      <div className="mt-2 border rule bg-[var(--card)] px-2.5 py-2 font-mono text-[10px] leading-[1.6] break-all">
         {snippet}
-      </pre>
-      <button
-        onClick={() => void copy()}
-        className="mt-1 font-mono text-[12px] border rule px-2 py-1 hover:bg-[var(--card)]"
-      >
+      </div>
+      <button onClick={() => void copy()} className="mt-2.5 link-accent text-[12px]">
         {copied ? 'copied' : 'copy'}
       </button>
-    </div>
+    </>
   );
 }
 
-function PageList({ pages }: { pages: PageEvent[] }): React.ReactElement {
-  const [open, setOpen] = useState(false);
-  const ok = pages.filter((p) => p.status === 'ok');
-  const shown = open ? ok : ok.slice(0, 8);
-
+function PathList({ pages, cited }: { pages: PageEvent[]; cited: Set<string> }): React.ReactElement {
   return (
-    <div>
-      <div className="font-mono text-[12px] text-[var(--muted)] mb-1">
-        indexed · {ok.length}
-      </div>
-      <ul className="font-mono text-[12px] space-y-[2px]">
-        {shown.map((p) => (
-          <li key={p.url} className="truncate">
-            <a
-              href={p.url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="hover:text-[var(--signal)] hover:underline"
-              title={p.title || p.url}
-            >
-              {new URL(p.url).pathname || '/'}
-            </a>
-          </li>
-        ))}
-      </ul>
-      {ok.length > 8 && (
-        <button
-          onClick={() => setOpen(!open)}
-          className="mt-1 font-mono text-[12px] text-[var(--signal)] hover:underline"
+    <div className="mt-3 flex flex-col gap-[7px] font-mono text-[12px]">
+      {pages.map((p) => (
+        <a
+          key={p.url}
+          href={p.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          title={p.title || p.url}
+          className={`truncate ${
+            cited.has(p.url)
+              ? 'text-[var(--accent)] underline underline-offset-[3px]'
+              : 'text-[var(--ink)] no-underline hover:text-[var(--accent)]'
+          }`}
         >
-          {open ? 'show fewer' : `show all ${ok.length}`}
-        </button>
-      )}
+          {shortPath(p.url)}
+        </a>
+      ))}
     </div>
   );
 }
 
-/**
- * Retrieval runs before the model is called, and on a throttled embedding tier
- * that is seconds of nothing. Naming the phase beats a caret that just blinks.
- */
-function Thinking({ stage }: { stage: AnswerStage | null }): React.ReactElement {
-  const label = stage === 'generating' ? 'writing an answer' : 'searching the indexed pages';
-  return (
-    <p className="font-mono text-[13px] text-[var(--muted)]" role="status" aria-live="polite">
-      {label}
-      <span className="dots" aria-hidden="true" />
-    </p>
-  );
-}
-
-export function Chat({ session }: { session: SessionDetail }): React.ReactElement {
+export function Chat({ session, onReset }: { session: SessionDetail; onReset: () => void }): React.ReactElement {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [stage, setStage] = useState<AnswerStage | null>(null);
   const [used, setUsed] = useState(session.messagesUsed);
   const [capped, setCapped] = useState(false);
+  const [listOpen, setListOpen] = useState(false);
   const scroller = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  const okPages = useMemo(() => session.pages.filter((p) => p.status === 'ok'), [session.pages]);
+
+  // The pages the newest answer cited, highlighted in the sidebar.
+  const cited = useMemo(() => {
+    const last = [...turns].reverse().find((t) => t.role === 'assistant' && t.sources?.length);
+    return new Set((last?.sources ?? []).map((s) => s.url));
+  }, [turns]);
+
+  // Derived from real indexed pages rather than invented copy.
+  const starters = useMemo(
+    () => okPages.filter((p) => p.title).slice(0, 3).map((p) => `Tell me about ${cleanTitle(p.title)}`),
+    [okPages],
+  );
 
   useEffect(() => {
     scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: 'smooth' });
@@ -155,93 +195,130 @@ export function Chat({ session }: { session: SessionDetail }): React.ReactElemen
   };
 
   const remaining = session.messagesAllowed - used;
+  const counter = remaining > 0
+    ? `${remaining} message${remaining === 1 ? '' : 's'} left in this demo session`
+    : 'No messages left in this demo session';
 
   return (
-    <div className="mx-auto max-w-5xl w-full px-4 py-6 md:py-4 grid gap-6 md:grid-cols-[13rem_1fr] md:flex-1 md:min-h-0">
-      {/* Stays put while the transcript moves; scrolls internally if the page
-          list outgrows the viewport. */}
-      <aside className="md:border-r rule md:pr-5 md:h-full md:overflow-y-auto scroll-thin">
-        <PageList pages={session.pages} />
-        <div className="border-t rule my-4" />
-        <EmbedSnippet sessionId={session.sessionId} widgetOrigin={session.widgetOrigin} />
-        <p className="mt-4 text-[13px] text-[var(--muted)] leading-snug">
-          This session expires in 24 hours. A permanent one is a conversation —{' '}
-          <a
-            className="text-[var(--signal)] underline underline-offset-2"
-            href="https://kleiosoftware.com/book-a-call"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            talk to Kleio
-          </a>
-          .
-        </p>
+    <div className="md:flex-1 md:min-h-0 grid md:grid-cols-[236px_1fr] md:h-full">
+      {/* Sidebar is desktop only; on a phone the paths live behind a disclosure. */}
+      <aside className="hidden md:flex border-r rule px-6 py-[26px] flex-col overflow-hidden">
+        <div className="text-[12px] text-[var(--muted)]">indexed · {okPages.length}</div>
+        <div className="min-h-0 overflow-y-auto scroll-thin -mr-2 pr-2">
+          <PathList pages={okPages} cited={cited} />
+        </div>
+        <div className="mt-auto pt-[26px]">
+          <EmbedSnippet sessionId={session.sessionId} widgetOrigin={session.widgetOrigin} />
+          <p className="mt-[18px] text-[12px] leading-[1.55] text-[var(--muted)]">
+            This session expires in 24 hours. A permanent one is a conversation —{' '}
+            <a
+              className="link-accent"
+              href="https://kleiosoftware.com/book-a-call"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              talk to Kleio
+            </a>
+            .
+          </p>
+        </div>
       </aside>
 
       <section className="min-w-0 flex flex-col min-h-[60vh] md:min-h-0 md:h-full">
-        <header className="shrink-0 pb-3 border-b rule">
-          <h1 className="font-mono text-[13px]">{session.domain}</h1>
-          <p className="text-[13px] text-[var(--muted)] mt-1">
+        <header className="shrink-0 px-[18px] py-4 md:px-11 md:pt-[26px] md:pb-5 border-b rule">
+          <div className="flex items-baseline justify-between gap-6">
+            <h1 className="text-[17px] md:text-[22px] font-semibold tracking-[-0.02em] leading-[1.1] truncate">
+              {session.domain}
+            </h1>
+            <button
+              onClick={onReset}
+              className="text-[11.5px] md:text-[12px] text-[var(--muted)] underline underline-offset-[3px] whitespace-nowrap py-2 md:py-0"
+            >
+              <span className="md:hidden">change site</span>
+              <span className="hidden md:inline">← index a different site</span>
+            </button>
+          </div>
+          <p className="hidden md:block mt-[7px] text-[13px] text-[var(--muted)]">
             Reading {session.pageCount} pages. Ask it something you already know the answer to.
           </p>
+          <div className="md:hidden mt-2 flex items-baseline justify-between text-[12px] text-[var(--muted)]">
+            <span>{okPages.length} pages indexed</span>
+            <button onClick={() => setListOpen(!listOpen)} className="link-accent py-2" aria-expanded={listOpen}>
+              {listOpen ? 'hide the list ↑' : 'see the list ↓'}
+            </button>
+          </div>
+          {listOpen && (
+            <div className="md:hidden pb-1">
+              <PathList pages={okPages} cited={cited} />
+            </div>
+          )}
         </header>
 
-        <div ref={scroller} className="flex-1 min-h-0 overflow-y-auto scroll-thin py-4 space-y-5">
+        <div
+          ref={scroller}
+          className="flex-1 min-h-0 overflow-y-auto scroll-thin px-[18px] py-[18px] md:px-11 md:py-[30px]"
+        >
           {turns.length === 0 && (
-            <p className="text-[var(--muted)] text-[14px]">
-              Nothing asked yet.
-            </p>
+            <>
+              <div className="text-[13px] md:text-[14px] text-[var(--muted)]">Nothing asked yet.</div>
+              {starters.length > 0 && (
+                <div className="mt-6 max-w-[540px] border-t rule">
+                  {starters.map((q) => (
+                    <button
+                      key={q}
+                      onClick={() => void ask(q)}
+                      className="w-full flex items-baseline justify-between gap-5 py-[14px] border-b rule text-left text-[15px]"
+                    >
+                      <span>{q}</span>
+                      <span className="text-[12px] text-[var(--accent)] whitespace-nowrap">ask →</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </>
           )}
 
           {turns.map((turn, i) =>
             turn.role === 'user' ? (
-              <div key={i} className="font-mono text-[13px]">
-                <span className="text-[var(--signal)]">› </span>
+              <div key={i} className="text-[13px] md:text-[14px] text-[var(--muted)] mt-7 first:mt-0">
                 {turn.text}
               </div>
             ) : (
-              <div key={i} className="max-w-prose">
+              <div key={i} className="mt-3 md:mt-4">
                 {turn.error ? (
-                  <p className="text-[var(--flag)] text-[14px]">{turn.error}</p>
+                  <p className="text-[var(--flag)] text-[14px] max-w-[640px]">{turn.error}</p>
                 ) : (
                   <>
-                    {busy && i === turns.length - 1 && turn.text === '' && (
-                      <Thinking stage={stage} />
+                    {busy && i === turns.length - 1 && turn.text === '' && <Thinking stage={stage} />}
+                    {turn.text !== '' && (
+                      <p
+                        className="text-[16.5px] md:text-[17.5px] leading-[1.6] tracking-[-0.006em] max-w-[640px] whitespace-pre-wrap"
+                        style={{ textWrap: 'pretty' } as React.CSSProperties}
+                      >
+                        <AnswerText text={turn.text} />
+                        {busy && i === turns.length - 1 && (
+                          <span className="caret h-[15px] ml-0.5 align-[-2px]" aria-hidden="true" />
+                        )}
+                      </p>
                     )}
-                    <p className="whitespace-pre-wrap">
-                      <AnswerText text={turn.text} />
-                      {busy && i === turns.length - 1 && turn.text !== '' && (
-                        <span className="cursor text-[var(--signal)]">▌</span>
-                      )}
-                    </p>
-                    {turn.sources && turn.sources.length > 0 && (
-                      <div className="flex flex-wrap gap-1.5 mt-2">
-                        {turn.sources.map((s) => (
-                          <a
-                            key={s.url}
-                            href={s.url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="font-mono text-[11px] border rule px-1.5 py-0.5 hover:border-[var(--signal)] hover:text-[var(--signal)]"
-                            title={s.title}
-                          >
-                            {new URL(s.url).pathname || '/'} ↗
-                          </a>
-                        ))}
-                      </div>
-                    )}
+                    {turn.sources && turn.sources.length > 0 && <Footnotes sources={turn.sources} />}
                   </>
                 )}
               </div>
             ),
           )}
+
+          {/* The snippet follows the transcript on a phone, where there is no sidebar. */}
+          <div className="md:hidden mt-10 pt-2">
+            <EmbedSnippet sessionId={session.sessionId} widgetOrigin={session.widgetOrigin} />
+          </div>
         </div>
 
         <form
-          className="shrink-0 border-t rule pt-3"
+          className="shrink-0 px-[18px] pb-[18px] md:px-11 md:pb-[26px]"
           onSubmit={(e) => { e.preventDefault(); void ask(input); }}
         >
-          <div className="flex gap-2">
+          <div className="border-t rule pt-[14px] md:pt-[18px] flex items-end justify-between gap-4 md:gap-6">
             <input
               ref={inputRef}
               value={input}
@@ -250,20 +327,19 @@ export function Chat({ session }: { session: SessionDetail }): React.ReactElemen
               placeholder={capped ? 'Message limit reached for this session' : 'Ask about this site'}
               aria-label="Ask about this site"
               maxLength={1000}
-              className="flex-1 bg-[var(--card)] border rule px-3 py-2 text-[14px] disabled:opacity-60"
+              className="bare-field flex-1 text-[16px] md:text-[19px] pb-[9px] md:pb-2.5"
             />
             <button
               type="submit"
               disabled={busy || capped || !input.trim()}
-              className="border rule px-4 py-2 font-mono text-[13px] hover:bg-[var(--card)] disabled:opacity-40"
+              className="bare-action pb-[9px] md:pb-2.5 text-[15px] md:text-[16px] font-medium"
             >
-              {busy ? '…' : 'ask'}
+              ask
             </button>
           </div>
-          <div className="font-mono text-[11px] text-[var(--muted)] mt-1.5">
-            {remaining > 0
-              ? `${remaining} message${remaining === 1 ? '' : 's'} left in this demo session`
-              : 'No messages left in this demo session'}
+          <div className="mt-2.5 text-[11px] md:text-[11.5px] text-[var(--muted)] tnum">
+            {counter}
+            <span className="md:hidden"> · expires in 24 hours</span>
           </div>
         </form>
       </section>

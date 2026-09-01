@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { PageEvent } from './api';
 
 const STAGE_LABEL: Record<string, string> = {
@@ -14,9 +14,38 @@ const STAGE_LABEL: Record<string, string> = {
 function shortPath(url: string): string {
   try {
     const u = new URL(url);
-    const p = u.pathname === '/' ? '/' : u.pathname.replace(/\/$/, '');
-    return p;
+    return u.pathname === '/' ? '/' : u.pathname.replace(/\/$/, '');
   } catch { return url; }
+}
+
+/**
+ * Between embedding batches nothing else on this screen moves — on a throttled
+ * tier that can be twenty seconds of apparent death. This is the one element
+ * that keeps ticking, and because it counts real seconds since the indexer last
+ * moved a counter, a genuine stall reads differently from a slow run instead of
+ * being disguised by a spinner.
+ */
+function Heartbeat({ chunks, embedded, stage, lastEventAt }: {
+  chunks: number; embedded: number; stage: string; lastEventAt: number;
+}): React.ReactElement | null {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 500);
+    return () => clearInterval(t);
+  }, []);
+
+  const quietFor = Math.max(0, Math.floor((now - lastEventAt) / 1000));
+  const embedding = stage === 'indexing' && chunks > 0;
+  if (!embedding && quietFor < 4) return null;
+
+  return (
+    <div className="mt-3 text-[12px] md:text-[13px] text-[var(--muted)] tnum" role="status" aria-live="polite">
+      {embedding && <>embedded {embedded} of {chunks}<span className="mx-2">·</span></>}
+      {quietFor < 1
+        ? <>working<span className="dots" aria-hidden="true" /></>
+        : <>last update {quietFor}s ago</>}
+    </div>
+  );
 }
 
 function Elapsed({ from, running }: { from: number; running: boolean }): React.ReactElement {
@@ -44,89 +73,91 @@ export interface CrawlLogProps {
   queued: number;
   stage: string;
   startedAt: number;
+  lastEventAt: number;
   running: boolean;
 }
 
 const VISIBLE = 12;
 
-export function CrawlLog(props: CrawlLogProps): React.ReactElement {
-  const { domain, pages, chunks, embedded, queued, stage, startedAt, running } = props;
-  const seenCount = useRef(0);
+/** A simple ramp, not a mask: older rows recede rather than being clipped. */
+const FADE = [1, 1, 1, 1, 1, 0.62, 0.4, 0.2];
+const fadeAt = (i: number): number => FADE[i] ?? 0.15;
 
-  // Newest first. Only rows past the previous render animate.
+export function CrawlLog(props: CrawlLogProps): React.ReactElement {
+  const { domain, pages, chunks, embedded, queued, stage, startedAt, lastEventAt, running } = props;
+
   const recent = [...pages].reverse().slice(0, VISIBLE);
-  const previouslySeen = seenCount.current;
-  useEffect(() => { seenCount.current = pages.length; });
 
   const ok = pages.filter((p) => p.status === 'ok').length;
+  const showEmbedded = stage === 'indexing' || (embedded > 0 && queued === 0);
 
   return (
-    <div className="w-full max-w-3xl mx-auto">
-      <div className="flex items-baseline justify-between gap-4 px-3 pb-2">
-        <span className="font-mono text-[13px] truncate">{domain}</span>
-        <span className="font-mono text-[13px] text-[var(--muted)]">
+    <>
+      <div className="flex justify-between items-baseline px-[18px] pt-4 pb-3 md:px-12 md:pt-[22px] md:pb-5">
+        <span className="font-mono text-[13px] md:text-[14px] truncate">{domain}</span>
+        <span className="font-mono text-[13px] md:text-[14px] text-[var(--muted)]">
           <Elapsed from={startedAt} running={running} />
         </span>
       </div>
 
-      <div className="border-t rule" />
+      <div className="px-[18px] pb-5 md:px-12 md:pb-[30px] border-b rule flex flex-col gap-5 md:flex-row md:items-end md:justify-between md:gap-10">
+        <div>
+          <div className="flex items-end gap-1.5">
+            <span className="text-[26px] md:text-[38px] font-medium tracking-[-0.028em] leading-none">
+              {STAGE_LABEL[stage] ?? stage}
+            </span>
+            {running && (
+              <span className="caret h-[22px] md:h-[34px] mb-[3px] md:mb-[5px]" aria-hidden="true" />
+            )}
+          </div>
+          {running && (
+            <Heartbeat chunks={chunks} embedded={embedded} stage={stage} lastEventAt={lastEventAt} />
+          )}
+        </div>
 
-      <div className="px-3 py-2 font-mono text-[13px]">
-        <span className="text-[var(--signal)]">{STAGE_LABEL[stage] ?? stage}</span>
-        {stage === 'indexing' && chunks > 0 && (
-          <span className="text-[var(--muted)]"> · {embedded}/{chunks} embedded</span>
-        )}
-        {running && <span className="cursor text-[var(--signal)]" aria-hidden="true"> ▌</span>}
+        <div className="flex justify-between md:justify-start gap-8 md:gap-[52px] md:pb-1.5" role="status" aria-live="polite">
+          <Stat n={ok} label="pages read" />
+          <Stat n={chunks} label="chunks built" />
+          {showEmbedded
+            ? <Stat n={embedded} label="embedded" />
+            : <Stat n={queued} label="in queue" />}
+        </div>
       </div>
 
-      <div className="border-t rule" />
-
-      <div className="grid grid-cols-3 gap-3 px-3 py-3" role="status" aria-live="polite">
-        <Stat n={ok} label="pages read" />
-        <Stat n={chunks} label="chunks built" />
-        {stage === 'indexing' || (embedded > 0 && queued === 0)
-          ? <Stat n={embedded} label="embedded" />
-          : <Stat n={queued} label="in queue" />}
-      </div>
-
-      <div className="border-t rule" />
-
-      <div
-        className="bg-[var(--card)] border-b rule overflow-hidden"
-        aria-label="Pages being read, newest first"
-      >
+      <div className="flex-1 px-[18px] md:px-12 overflow-hidden" aria-label="Pages being read, newest first">
         {recent.length === 0 && (
-          <div className="px-3 py-6 font-mono text-[13px] text-[var(--muted)]">
+          <div className="py-6 font-mono text-[13.5px] text-[var(--muted)]">
             waiting for the first page…
           </div>
         )}
         {recent.map((p, i) => {
           const index = pages.length - i;
-          const isNew = index > previouslySeen;
-          const faded = i >= VISIBLE - 3;
+          const isNewest = i === 0;
+          const failed = p.status !== 'ok';
           return (
             <div
               key={`${p.url}-${index}`}
-              className={`logrow ${isNew ? 'logrow-new' : ''}`}
-              style={faded ? { opacity: 1 - (i - (VISIBLE - 4)) * 0.22 } : undefined}
+              className={`logrow ${isNewest ? 'logrow-new' : ''}`}
+              style={{ opacity: fadeAt(i) }}
             >
-              <span className="text-[var(--muted)] text-right">{index}</span>
-              <span className="truncate" title={p.url}>
-                {shortPath(p.url)}
+              <span className={`font-mono tnum text-right ${isNewest ? 'text-[var(--accent)]' : 'text-[var(--muted)]'}`}>
+                {index}
               </span>
-              <span className="logtitle truncate text-[var(--muted)]" title={p.title}>
-                {p.status === 'ok' ? p.title : statusNote(p.status)}
-              </span>
+              <span className="font-mono truncate" title={p.url}>{shortPath(p.url)}</span>
               <span
-                className={`text-right ${p.status === 'ok' ? 'text-[var(--good)]' : 'text-[var(--flag)]'}`}
+                className={`logtitle truncate ${failed ? 'text-[var(--flag)]' : 'text-[var(--muted)]'}`}
+                title={p.title}
               >
-                {p.status === 'ok' ? p.charCount.toLocaleString() : '—'}
+                {failed ? statusNote(p.status) : p.title}
+              </span>
+              <span className={`font-mono tnum text-right ${failed ? 'text-[var(--flag)]' : 'text-[var(--muted)]'}`}>
+                {failed ? '—' : p.charCount.toLocaleString()}
               </span>
             </div>
           );
         })}
       </div>
-    </div>
+    </>
   );
 }
 
@@ -136,11 +167,16 @@ function statusNote(status: string): string {
   return 'could not read';
 }
 
+/** A counter at zero is not news, so it recedes to muted until it moves. */
 function Stat({ n, label }: { n: number; label: string }): React.ReactElement {
   return (
     <div>
-      <div className="font-mono tnum text-[26px] leading-none">{n}</div>
-      <div className="font-mono text-[12px] text-[var(--muted)] mt-1">{label}</div>
+      <div
+        className={`tnum text-[30px] md:text-[44px] font-semibold tracking-[-0.03em] leading-[.9] ${n === 0 ? 'text-[var(--muted)]' : ''}`}
+      >
+        {n}
+      </div>
+      <div className="text-[12px] text-[var(--muted)] mt-2">{label}</div>
     </div>
   );
 }

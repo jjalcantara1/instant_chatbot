@@ -14,6 +14,19 @@ type View =
 
 const EXAMPLES = ['kleiosoftware.com', '11ty.dev', 'danluu.com'];
 
+/** The input and error screens share this; the crawl and chat screens do not. */
+function TopBar(): React.ReactElement {
+  return (
+    <div className="flex justify-between items-baseline px-[18px] py-4 md:px-12 md:py-[22px] border-b rule">
+      <span className="text-[13px] md:text-[14px] font-semibold tracking-[-0.01em]">Site Chat</span>
+      <span className="text-[11px] md:text-[12px] text-[var(--muted)]">
+        <span className="md:hidden">25 pages max</span>
+        <span className="hidden md:inline">25 pages max · expires in 24 hours · no account</span>
+      </span>
+    </div>
+  );
+}
+
 export function App(): React.ReactElement {
   const [view, setView] = useState<View>({ kind: 'input' });
   const [url, setUrl] = useState('');
@@ -26,6 +39,12 @@ export function App(): React.ReactElement {
   const [queued, setQueued] = useState(0);
   const [stage, setStage] = useState('resolving');
   const [domain, setDomain] = useState('');
+  // Drives the 240ms slide-out so the log appears to dock into the sidebar.
+  const [leaving, setLeaving] = useState(false);
+  // When the indexer last actually did something. Embedding batches can be
+  // tens of seconds apart on a throttled tier, and a stalled run has to look
+  // different from a slow one.
+  const [lastEventAt, setLastEventAt] = useState(Date.now());
   const startedAt = useRef(Date.now());
   const teardown = useRef<(() => void) | null>(null);
 
@@ -41,17 +60,30 @@ export function App(): React.ReactElement {
     try {
       const sessionId = await createSession(target);
 
-      setPages([]); setChunks(0); setQueued(0); setStage('resolving');
+      setPages([]); setChunks(0); setEmbedded(0); setQueued(0); setStage('resolving');
+      setLeaving(false);
+      setLastEventAt(Date.now());
       setDomain(target.replace(/^https?:\/\//, '').replace(/\/.*$/, ''));
       startedAt.current = Date.now();
       setView({ kind: 'indexing' });
       history.replaceState(null, '', `?s=${sessionId}`);
 
       teardown.current = subscribeToIndex(sessionId, {
-        onPage: (p) => setPages((prev) => [...prev, p]),
+        onPage: (p) => {
+          setPages((prev) => [...prev, p]);
+          setLastEventAt(Date.now());
+        },
         onProgress: (p) => {
-          setChunks(p.chunks);
-          setEmbedded(p.embedded);
+          // Only a change in the real counters counts as activity; a repeated
+          // progress frame carrying the same numbers is not evidence of work.
+          setChunks((prev) => {
+            if (p.chunks !== prev) setLastEventAt(Date.now());
+            return p.chunks;
+          });
+          setEmbedded((prev) => {
+            if (p.embedded !== prev) setLastEventAt(Date.now());
+            return p.embedded;
+          });
           setQueued(p.pagesQueued);
           if (p.stage) setStage(p.stage);
         },
@@ -59,7 +91,14 @@ export function App(): React.ReactElement {
           void (async () => {
             try {
               const session = await getSession(sessionId);
-              setView({ kind: 'chat', session });
+              // Fetch first, then animate, so the log never slides away onto a
+              // blank screen if the session lookup fails.
+              const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+              setLeaving(true);
+              window.setTimeout(() => {
+                setLeaving(false);
+                setView({ kind: 'chat', session });
+              }, reduced ? 120 : 240);
             } catch (e) {
               const err = e as ApiError;
               setView({ kind: 'failed', code: err.code, message: err.message });
@@ -104,20 +143,15 @@ export function App(): React.ReactElement {
     return (
       // Desktop is a fixed shell so only the transcript scrolls. On a phone the
       // panes stack, so the page scrolls normally instead.
-      <div className="min-h-full md:h-full flex flex-col md:overflow-hidden">
-        <Chat session={view.session} />
-        <footer className="shrink-0 w-full max-w-5xl mx-auto px-4 pb-8 md:pb-3 md:pt-1">
-          <button onClick={reset} className="font-mono text-[12px] text-[var(--signal)] hover:underline">
-            ← index a different site
-          </button>
-        </footer>
+      <div className="min-h-full md:h-full flex flex-col md:overflow-hidden screen-entering">
+        <Chat session={view.session} onReset={reset} />
       </div>
     );
   }
 
   if (view.kind === 'indexing') {
     return (
-      <main className="min-h-full flex items-start justify-center px-4 pt-16 pb-10">
+      <main className={`min-h-full md:h-full flex flex-col md:overflow-hidden ${leaving ? 'crawl-leaving' : ''}`}>
         <CrawlLog
           domain={domain}
           pages={pages}
@@ -126,7 +160,8 @@ export function App(): React.ReactElement {
           queued={queued}
           stage={stage}
           startedAt={startedAt.current}
-          running
+          lastEventAt={lastEventAt}
+          running={!leaving}
         />
       </main>
     );
@@ -134,75 +169,95 @@ export function App(): React.ReactElement {
 
   if (view.kind === 'failed') {
     return (
-      <main className="min-h-full flex items-center justify-center px-4">
-        <div className="max-w-lg w-full">
+      <main className="min-h-full flex flex-col">
+        <TopBar />
+        <div className="flex-1 flex flex-col justify-center px-[18px] md:px-12 py-10 md:py-0">
           <div className="font-mono text-[12px] text-[var(--flag)]">{view.code.toLowerCase()}</div>
-          <p className="mt-2 text-[17px] leading-snug">{view.message}</p>
-          <button
-            onClick={reset}
-            className="mt-5 border rule px-4 py-2 font-mono text-[13px] hover:bg-[var(--card)]"
+          <p
+            className="mt-[14px] text-[24px] md:text-[30px] font-semibold tracking-[-0.028em] leading-[1.2] max-w-[660px]"
+            style={{ textWrap: 'pretty' } as React.CSSProperties}
           >
-            try another site
-          </button>
+            {view.message}
+          </p>
+          <p className="mt-4 text-[15px] leading-[1.55] text-[var(--muted)] max-w-[460px]">
+            Nothing was stored. Point it at a different address, or at a page you control.
+          </p>
+          <div className="mt-[34px] flex flex-wrap items-baseline gap-x-7 gap-y-4">
+            <button onClick={reset} className="bare-action pb-2 text-[16px] font-medium">
+              try another site
+            </button>
+            <a
+              href="https://www.robotstxt.org/robotstxt.html"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-[13px] text-[var(--muted)] underline underline-offset-[3px] py-2 md:py-0"
+            >
+              read what it does and does not fetch
+            </a>
+          </div>
         </div>
       </main>
     );
   }
 
   return (
-    <main className="min-h-full flex items-center justify-center px-4">
-      <div className="w-full max-w-xl">
-        <h1 className="text-[30px] leading-[1.15] font-medium">
+    <main className="min-h-full flex flex-col">
+      <TopBar />
+      <div className="flex-1 flex flex-col justify-center px-[18px] md:px-12 py-10 md:py-0">
+        <h1
+          className="m-0 font-semibold text-[40px] md:text-[62px] leading-[1.05] md:leading-[1.04] tracking-[-0.032em] md:tracking-[-0.035em] max-w-[840px]"
+          style={{ textWrap: 'pretty' } as React.CSSProperties}
+        >
           Point this at your website.
         </h1>
-        <p className="mt-2 text-[var(--muted)]">
+        <p className="mt-[14px] md:mt-[22px] text-[15px] md:text-[18px] leading-[1.5] text-[var(--muted)] max-w-[480px]">
           It reads the pages, then you can ask it things. Watch it work.
         </p>
 
         <form
-          className="mt-6 flex gap-2"
+          className="mt-[34px] md:mt-[54px] md:flex md:items-end md:gap-7 md:max-w-[860px]"
           onSubmit={(e) => { e.preventDefault(); void start(url); }}
         >
-          <input
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-            placeholder="your-site.com"
-            aria-label="Website address"
-            autoComplete="url"
-            spellCheck={false}
-            className="flex-1 bg-[var(--card)] border rule px-3 py-2.5 font-mono text-[14px]"
-          />
+          <div className="md:flex-1">
+            <input
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              placeholder="your-site.com"
+              aria-label="Website address"
+              autoComplete="url"
+              spellCheck={false}
+              className="bare-field font-mono text-[19px] md:text-[30px] pb-[10px] md:pb-3"
+            />
+          </div>
+          {/* A text link is too small a target on a phone, so this is the one
+              bordered action in the app. */}
           <button
             type="submit"
             disabled={submitting || !url.trim()}
-            className="border rule px-4 py-2.5 font-mono text-[13px] hover:bg-[var(--card)] disabled:opacity-40 whitespace-nowrap"
+            className="mt-[22px] w-full border border-[var(--accent)] py-[14px] text-[16px] font-medium text-[var(--accent)] disabled:opacity-40
+                       md:mt-0 md:w-auto md:border-x-0 md:border-t-0 md:border-b-2 md:py-0 md:pb-3 md:text-[20px] md:font-normal md:whitespace-nowrap"
           >
             {submitting ? 'starting…' : 'read it →'}
           </button>
         </form>
 
         {inputError && (
-          <p className="mt-2 text-[13px] text-[var(--flag)]">{inputError}</p>
+          <p className="mt-3 text-[13px] text-[var(--flag)] max-w-[640px]">{inputError}</p>
         )}
 
-        <div className="mt-4 font-mono text-[12px] text-[var(--muted)]">
-          or try{' '}
-          {EXAMPLES.map((e, i) => (
-            <span key={e}>
-              {i > 0 && '  '}
-              <button
-                onClick={() => { setUrl(e); void start(e); }}
-                className="text-[var(--signal)] hover:underline"
-              >
-                {e}
-              </button>
-            </span>
+        <div className="mt-[22px] md:mt-6 flex flex-wrap items-baseline gap-x-[14px] md:gap-x-5 gap-y-[14px] text-[12.5px] md:text-[13px] text-[var(--muted)]">
+          <span>or try</span>
+          {EXAMPLES.map((e) => (
+            <button
+              key={e}
+              type="button"
+              onClick={() => { setUrl(e); void start(e); }}
+              className="link-path font-mono text-[13px] py-1 md:py-0"
+            >
+              {e}
+            </button>
           ))}
         </div>
-
-        <p className="mt-8 font-mono text-[12px] text-[var(--muted)]">
-          25 pages max · expires in 24 hours · no account
-        </p>
       </div>
     </main>
   );
