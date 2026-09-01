@@ -1,7 +1,8 @@
 import express from 'express';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { config } from './config.js';
+import { config, resolveChat } from './config.js';
+import { resolveEmbedding } from './indexing/embed.js';
 import { getDb, sweepExpired } from './db.js';
 import { router } from './http/routes.js';
 import { sweepJobs } from './http/jobs.js';
@@ -49,12 +50,16 @@ setInterval(() => {
 const server = app.listen(config.port, () => {
   console.log(`site-chat api on :${config.port}`);
   console.log(`  db          ${config.databasePath}`);
-  console.log(`  chat model  ${config.chatModel}`);
-  console.log(`  embeddings  ${config.embeddingProvider}/${config.embeddingModel}`);
+  const chat = resolveChat();
+  console.log(`  chat        ${chat.provider}/${chat.model}`);
+  const embedding = resolveEmbedding();
+  console.log(`  embeddings  ${embedding.provider}/${embedding.model}`);
   const missing = [
-    !config.anthropicApiKey && 'ANTHROPIC_API_KEY',
+    config.chatProvider === 'anthropic' && !config.anthropicApiKey && 'ANTHROPIC_API_KEY',
+    config.chatProvider === 'gemini' && !config.geminiApiKey && 'GEMINI_API_KEY',
     config.embeddingProvider === 'openai' && !config.openaiApiKey && 'OPENAI_API_KEY',
     config.embeddingProvider === 'voyage' && !config.voyageApiKey && 'VOYAGE_API_KEY',
+    config.embeddingProvider === 'gemini' && !config.geminiApiKey && 'GEMINI_API_KEY',
     !config.adminToken && 'ADMIN_TOKEN (/admin/stats disabled)',
     config.ipHashSalt === 'dev-salt-do-not-use-in-prod' && 'IP_HASH_SALT (using dev default)',
   ].filter(Boolean);

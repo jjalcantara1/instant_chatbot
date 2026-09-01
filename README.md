@@ -36,16 +36,30 @@ npm install
 
 | Variable | Purpose |
 |---|---|
-| `ANTHROPIC_API_KEY` | Chat. Without it, indexing works but answering fails. |
+| `CHAT_PROVIDER` | `anthropic` (default) or `gemini`. |
+| `ANTHROPIC_API_KEY` | Chat, when `CHAT_PROVIDER=anthropic`. Indexing works without it; answering fails. |
+| `GEMINI_API_KEY` | Chat, when `CHAT_PROVIDER=gemini`. |
+| `EMBEDDING_PROVIDER` | `openai` (default) or `voyage`. |
 | `OPENAI_API_KEY` | Embeddings. Without it, indexing fails. |
 | `IP_HASH_SALT` | Salts the rate-limit IP hashes. **Change from the default.** |
 | `ADMIN_TOKEN` | Bearer token for `/admin/stats`. Unset disables the route. |
 | `PUBLIC_WIDGET_ORIGIN` | Public origin of *this API*. The embed snippet is built from it, so it must be where `widget.js` is actually served — not where the demo page is hosted. |
 
-`CHAT_MODEL` defaults to `claude-haiku-4-5-20251001`, the pinned snapshot for
-Claude Haiku 4.5. The dateless alias `claude-haiku-4-5` resolves to the same
-model. Speed is the product here, so no thinking is requested; Haiku 4.5 does
-not support the `effort` parameter.
+`CHAT_MODEL` is provider-specific and defaults per provider:
+`claude-haiku-4-5-20251001` for Anthropic (the pinned snapshot; the dateless
+alias `claude-haiku-4-5` resolves to the same model — both verified against the
+live Models API), and `gemini-3.5-flash-lite` for Gemini. A value belonging to
+the *other* provider is ignored in favour of that default, so switching
+`CHAT_PROVIDER` alone never sends a model id the provider cannot resolve.
+
+Chat sits behind a one-function interface in `server/src/chat/providers.ts`,
+the same way the embedder does. Adding a provider means writing one `ChatModel`
+and touching nothing else. Speed is the product here, so no thinking or
+`effort` parameter is requested from either provider.
+
+`ANTHROPIC_WORKSPACE_ID` is only needed for an identity-linked Anthropic key,
+which rejects every request without it. `GEMINI_BASE_URL` overrides the Gemini
+endpoint, for a proxy or for tests.
 
 ## Development commands
 
@@ -54,7 +68,7 @@ npm run crawl -- https://example.com          # crawl only, prints to stdout
 npm --workspace server run index-site -- URL  # crawl + chunk + embed into SQLite
 npm --workspace server run dump -- SESSION_ID # print a session's chunks to read
 npm run eval                                  # the retrieval-honesty gate
-npm test                                      # 68 tests
+npm test                                      # 71 tests
 ```
 
 `EMBEDDING_PROVIDER=hash` swaps in a deterministic offline embedder so the

@@ -74,8 +74,19 @@ body {
 @keyframes blink { 50% { opacity: 0.25; } }
 .cursor { animation: blink 1s step-end infinite; }
 
+/* Waiting on work that reports no progress of its own: the ellipsis is the
+   only honest signal available, so it carries no implied percentage. */
+@keyframes ellipsis {
+  0%   { content: ''; }
+  25%  { content: '.'; }
+  50%  { content: '..'; }
+  75%, 100% { content: '...'; }
+}
+.dots::after { content: '...'; animation: ellipsis 1.2s steps(1) infinite; }
+
 @media (prefers-reduced-motion: reduce) {
   .logrow-new, .cursor { animation: none; }
+  .dots::after { animation: none; content: '...'; }
   * { transition: none !important; }
 }
 

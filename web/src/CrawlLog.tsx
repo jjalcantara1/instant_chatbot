@@ -40,6 +40,7 @@ export interface CrawlLogProps {
   domain: string;
   pages: PageEvent[];
   chunks: number;
+  embedded: number;
   queued: number;
   stage: string;
   startedAt: number;
@@ -49,7 +50,7 @@ export interface CrawlLogProps {
 const VISIBLE = 12;
 
 export function CrawlLog(props: CrawlLogProps): React.ReactElement {
-  const { domain, pages, chunks, queued, stage, startedAt, running } = props;
+  const { domain, pages, chunks, embedded, queued, stage, startedAt, running } = props;
   const seenCount = useRef(0);
 
   // Newest first. Only rows past the previous render animate.
@@ -72,6 +73,9 @@ export function CrawlLog(props: CrawlLogProps): React.ReactElement {
 
       <div className="px-3 py-2 font-mono text-[13px]">
         <span className="text-[var(--signal)]">{STAGE_LABEL[stage] ?? stage}</span>
+        {stage === 'indexing' && chunks > 0 && (
+          <span className="text-[var(--muted)]"> · {embedded}/{chunks} embedded</span>
+        )}
         {running && <span className="cursor text-[var(--signal)]" aria-hidden="true"> ▌</span>}
       </div>
 
@@ -80,7 +84,9 @@ export function CrawlLog(props: CrawlLogProps): React.ReactElement {
       <div className="grid grid-cols-3 gap-3 px-3 py-3" role="status" aria-live="polite">
         <Stat n={ok} label="pages read" />
         <Stat n={chunks} label="chunks built" />
-        <Stat n={queued} label="in queue" />
+        {stage === 'indexing' || (embedded > 0 && queued === 0)
+          ? <Stat n={embedded} label="embedded" />
+          : <Stat n={queued} label="in queue" />}
       </div>
 
       <div className="border-t rule" />

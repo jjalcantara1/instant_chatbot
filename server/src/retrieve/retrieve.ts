@@ -101,7 +101,7 @@ export async function retrieve(
   const index = loadSessionIndex(db, sessionId);
   if (index.chunks.length === 0) return { chunks: [], insufficient: true };
 
-  const { vectors } = await embedder.embed([query]);
+  const { vectors } = await embedder.embed([query], 'query');
   const qv = vectors[0];
   if (!qv) return { chunks: [], insufficient: true };
 

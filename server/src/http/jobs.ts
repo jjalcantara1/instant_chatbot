@@ -181,6 +181,9 @@ async function runJob(sessionId: string, url: string, job: IndexJob): Promise<vo
     invalidateSession(sessionId);
   } catch (err) {
     const { code, message } = toUserFacing(err);
+    // The visitor gets the friendly line; the operator needs the real cause,
+    // otherwise a failing index is undiagnosable from the logs alone.
+    console.error(`[index ${sessionId}] failed as ${code}:`, err);
     db.prepare('UPDATE sessions SET status = ?, error = ? WHERE id = ?').run('failed', code, sessionId);
     job.emit({ type: 'error', code, message });
   } finally {

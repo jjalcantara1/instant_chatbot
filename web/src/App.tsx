@@ -22,6 +22,7 @@ export function App(): React.ReactElement {
 
   const [pages, setPages] = useState<PageEvent[]>([]);
   const [chunks, setChunks] = useState(0);
+  const [embedded, setEmbedded] = useState(0);
   const [queued, setQueued] = useState(0);
   const [stage, setStage] = useState('resolving');
   const [domain, setDomain] = useState('');
@@ -50,6 +51,7 @@ export function App(): React.ReactElement {
         onPage: (p) => setPages((prev) => [...prev, p]),
         onProgress: (p) => {
           setChunks(p.chunks);
+          setEmbedded(p.embedded);
           setQueued(p.pagesQueued);
           if (p.stage) setStage(p.stage);
         },
@@ -100,9 +102,11 @@ export function App(): React.ReactElement {
 
   if (view.kind === 'chat') {
     return (
-      <div className="min-h-full">
+      // Desktop is a fixed shell so only the transcript scrolls. On a phone the
+      // panes stack, so the page scrolls normally instead.
+      <div className="min-h-full md:h-full flex flex-col md:overflow-hidden">
         <Chat session={view.session} />
-        <footer className="max-w-5xl mx-auto px-4 pb-8">
+        <footer className="shrink-0 w-full max-w-5xl mx-auto px-4 pb-8 md:pb-3 md:pt-1">
           <button onClick={reset} className="font-mono text-[12px] text-[var(--signal)] hover:underline">
             ← index a different site
           </button>
@@ -118,6 +122,7 @@ export function App(): React.ReactElement {
           domain={domain}
           pages={pages}
           chunks={chunks}
+          embedded={embedded}
           queued={queued}
           stage={stage}
           startedAt={startedAt.current}

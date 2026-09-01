@@ -8,7 +8,7 @@ import type { DB } from '../db.js';
 export type IndexEvent =
   | { type: 'stage'; stage: string }
   | { type: 'page'; url: string; title: string; status: string; charCount: number }
-  | { type: 'progress'; pagesFetched: number; pagesQueued: number; chunks: number; stage: string }
+  | { type: 'progress'; pagesFetched: number; pagesQueued: number; chunks: number; embedded: number; stage: string }
   | { type: 'ready'; pages: number; chunks: number; elapsedMs: number; skipped: number }
   | { type: 'error'; code: IndexErrorCode; message: string };
 
@@ -47,7 +47,7 @@ export interface IndexResult {
 const BOILERPLATE_SAMPLE = 6;
 
 /** Embedding round trips issued in parallel. */
-const EMBED_CONCURRENCY = 4;
+const EMBED_CONCURRENCY = config.embeddingConcurrency;
 
 interface PendingChunk extends Chunk { pageId: number; }
 
@@ -147,6 +147,7 @@ export async function runIndex(opts: RunIndexOptions): Promise<IndexResult> {
         pagesFetched: pagesFetched,
         pagesQueued: pagesQueued,
         chunks: chunksStored + pendingEmbed.length,
+        embedded: chunksStored,
         stage: crawlDone ? 'indexing' : 'crawling',
       });
     }
@@ -186,6 +187,7 @@ export async function runIndex(opts: RunIndexOptions): Promise<IndexResult> {
           // Counting only stored ones leaves this at zero for the first few
           // seconds, which reads as broken during the part people watch.
           chunks: chunksStored + pendingEmbed.length,
+          embedded: chunksStored,
           stage: 'crawling',
         });
       },

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { sendMessage, type PageEvent, type SessionDetail, type Source } from './api';
+import { sendMessage, type AnswerStage, type PageEvent, type SessionDetail, type Source } from './api';
 
 interface Turn {
   role: 'user' | 'assistant';
@@ -96,10 +96,25 @@ function PageList({ pages }: { pages: PageEvent[] }): React.ReactElement {
   );
 }
 
+/**
+ * Retrieval runs before the model is called, and on a throttled embedding tier
+ * that is seconds of nothing. Naming the phase beats a caret that just blinks.
+ */
+function Thinking({ stage }: { stage: AnswerStage | null }): React.ReactElement {
+  const label = stage === 'generating' ? 'writing an answer' : 'searching the indexed pages';
+  return (
+    <p className="font-mono text-[13px] text-[var(--muted)]" role="status" aria-live="polite">
+      {label}
+      <span className="dots" aria-hidden="true" />
+    </p>
+  );
+}
+
 export function Chat({ session }: { session: SessionDetail }): React.ReactElement {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
+  const [stage, setStage] = useState<AnswerStage | null>(null);
   const [used, setUsed] = useState(session.messagesUsed);
   const [capped, setCapped] = useState(false);
   const scroller = useRef<HTMLDivElement>(null);
@@ -113,6 +128,7 @@ export function Chat({ session }: { session: SessionDetail }): React.ReactElemen
     if (!question.trim() || busy) return;
     setInput('');
     setBusy(true);
+    setStage('retrieving');
     setTurns((t) => [...t, { role: 'user', text: question }, { role: 'assistant', text: '' }]);
 
     const patchLast = (fn: (turn: Turn) => Turn): void => {
@@ -120,6 +136,7 @@ export function Chat({ session }: { session: SessionDetail }): React.ReactElemen
     };
 
     await sendMessage(session.sessionId, question, {
+      onStatus: (s) => setStage(s),
       onToken: (text) => patchLast((t) => ({ ...t, text: t.text + text })),
       onSources: (sources) => patchLast((t) => ({ ...t, sources })),
       onDone: (info) => {
@@ -133,14 +150,17 @@ export function Chat({ session }: { session: SessionDetail }): React.ReactElemen
     });
 
     setBusy(false);
+    setStage(null);
     inputRef.current?.focus();
   };
 
   const remaining = session.messagesAllowed - used;
 
   return (
-    <div className="mx-auto max-w-5xl w-full px-4 py-6 grid gap-6 md:grid-cols-[13rem_1fr]">
-      <aside className="md:border-r rule md:pr-5">
+    <div className="mx-auto max-w-5xl w-full px-4 py-6 md:py-4 grid gap-6 md:grid-cols-[13rem_1fr] md:flex-1 md:min-h-0">
+      {/* Stays put while the transcript moves; scrolls internally if the page
+          list outgrows the viewport. */}
+      <aside className="md:border-r rule md:pr-5 md:h-full md:overflow-y-auto scroll-thin">
         <PageList pages={session.pages} />
         <div className="border-t rule my-4" />
         <EmbedSnippet sessionId={session.sessionId} widgetOrigin={session.widgetOrigin} />
@@ -158,15 +178,15 @@ export function Chat({ session }: { session: SessionDetail }): React.ReactElemen
         </p>
       </aside>
 
-      <section className="min-w-0 flex flex-col" style={{ minHeight: '60vh' }}>
-        <header className="pb-3 border-b rule">
+      <section className="min-w-0 flex flex-col min-h-[60vh] md:min-h-0 md:h-full">
+        <header className="shrink-0 pb-3 border-b rule">
           <h1 className="font-mono text-[13px]">{session.domain}</h1>
           <p className="text-[13px] text-[var(--muted)] mt-1">
             Reading {session.pageCount} pages. Ask it something you already know the answer to.
           </p>
         </header>
 
-        <div ref={scroller} className="flex-1 overflow-y-auto scroll-thin py-4 space-y-5">
+        <div ref={scroller} className="flex-1 min-h-0 overflow-y-auto scroll-thin py-4 space-y-5">
           {turns.length === 0 && (
             <p className="text-[var(--muted)] text-[14px]">
               Nothing asked yet.
@@ -185,9 +205,12 @@ export function Chat({ session }: { session: SessionDetail }): React.ReactElemen
                   <p className="text-[var(--flag)] text-[14px]">{turn.error}</p>
                 ) : (
                   <>
+                    {busy && i === turns.length - 1 && turn.text === '' && (
+                      <Thinking stage={stage} />
+                    )}
                     <p className="whitespace-pre-wrap">
                       <AnswerText text={turn.text} />
-                      {busy && i === turns.length - 1 && turn.text === '' && (
+                      {busy && i === turns.length - 1 && turn.text !== '' && (
                         <span className="cursor text-[var(--signal)]">▌</span>
                       )}
                     </p>
@@ -215,7 +238,7 @@ export function Chat({ session }: { session: SessionDetail }): React.ReactElemen
         </div>
 
         <form
-          className="border-t rule pt-3"
+          className="shrink-0 border-t rule pt-3"
           onSubmit={(e) => { e.preventDefault(); void ask(input); }}
         >
           <div className="flex gap-2">

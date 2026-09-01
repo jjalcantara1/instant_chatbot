@@ -115,10 +115,9 @@ describe('chat refusal', () => {
     seed([[1, 0, 0, 0, 0, 0, 0, 0], [0.9, 0.2, 0, 0, 0, 0, 0, 0], [0.8, 0.3, 0, 0, 0, 0, 0, 0]]);
     const embedder = new ScriptedEmbedder({ helicopter: [0, 0, 0, 0, 1, 0, 0, 0] });
 
-    // No ANTHROPIC_API_KEY is configured in the test environment. If this path
-    // touched the model at all it would throw rather than answer, so a clean
-    // refusal here proves the model is never consulted.
-    expect(config.anthropicApiKey).toBe('');
+    // That the model is never consulted is proved below without depending on
+    // the ambient environment: a real call cannot yield zero output tokens, and
+    // a call made with an absent or rejected key would surface an error event.
 
     const events = [];
     for await (const e of streamAnswer({
@@ -129,7 +128,7 @@ describe('chat refusal', () => {
 
     const text = events.filter((e) => e.type === 'token').map((e) => (e as { text: string }).text).join('');
     expect(events.some((e) => e.type === 'error')).toBe(false);
-    expect(text).toContain('could not find anything about that on acme.test');
+    expect(text).toContain("site doesn't cover that");
 
     const sources = events.find((e) => e.type === 'sources') as { sources: unknown[] } | undefined;
     expect(sources?.sources).toEqual([]);

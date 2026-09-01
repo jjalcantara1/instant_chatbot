@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from 'express';
-import { config } from '../config.js';
+import { config, resolveChat } from '../config.js';
+import { resolveEmbedding } from '../indexing/embed.js';
 import { getDb } from '../db.js';
 import { openSse } from './sse.js';
 import { createSession, getJob, ValidationError, toUserFacing, queueDepth, runningCount } from './jobs.js';
@@ -122,15 +123,22 @@ router.get('/api/sessions/:id/events', (req: Request, res: Response) => {
 
   const channel = openSse(res);
 
+  // A stage change carries no counts of its own. Sending zeros would make the
+  // visitor watch the page and chunk counters collapse to 0 on the way into
+  // "building index", so carry the last real numbers across the transition.
+  let lastCounts = { pagesFetched: 0, pagesQueued: 0, chunks: 0, embedded: 0 };
+
   const forward = (e: IndexEvent): void => {
     if (e.type === 'page') {
       channel.send('page', { url: e.url, title: e.title, status: e.status, charCount: e.charCount });
     } else if (e.type === 'progress') {
-      channel.send('progress', {
-        pagesFetched: e.pagesFetched, pagesQueued: e.pagesQueued, chunks: e.chunks, stage: e.stage,
-      });
+      lastCounts = {
+        pagesFetched: e.pagesFetched, pagesQueued: e.pagesQueued,
+        chunks: e.chunks, embedded: e.embedded,
+      };
+      channel.send('progress', { ...lastCounts, stage: e.stage });
     } else if (e.type === 'stage') {
-      channel.send('progress', { pagesFetched: 0, pagesQueued: 0, chunks: 0, stage: e.stage });
+      channel.send('progress', { ...lastCounts, stage: e.stage });
     } else if (e.type === 'ready') {
       channel.send('ready', { pages: e.pages, chunks: e.chunks, elapsedMs: e.elapsedMs, skipped: e.skipped });
       channel.close();
@@ -168,6 +176,54 @@ router.get('/api/sessions/:id/events', (req: Request, res: Response) => {
   const unsubscribe = job.subscribe(forward);
   res.on('close', unsubscribe);
 });
+
+/**
+ * Reduce stored turns to well-formed user -> assistant pairs, dropping any
+ * question that never got an answer.
+ */
+export function pairedHistory(
+  rows: Array<{ role: 'user' | 'assistant'; content: string }>,
+): Array<{ role: 'user' | 'assistant'; content: string }> {
+  const out: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+  for (let i = 0; i < rows.length; i++) {
+    const turn = rows[i];
+    if (turn?.role !== 'user') continue;
+    const reply = rows[i + 1];
+    if (reply?.role === 'assistant') {
+      out.push(turn, reply);
+      i++;
+    }
+  }
+  return out;
+}
+
+/**
+ * A provider rate limit is not an internal error, and telling someone to "ask
+ * again" when the next attempt is also rate limited just wastes their patience.
+ * Name what happened and what to do about it.
+ */
+function chatError(detail: string, partial: boolean): { code: string; message: string } {
+  if (/429|rate limit|quota|RESOURCE_EXHAUSTED/i.test(detail)) {
+    return {
+      code: 'RATE_LIMITED',
+      message: partial
+        ? 'The answer stopped partway through because the demo hit a provider rate limit. Give it a minute, then ask again.'
+        : 'The demo hit a provider rate limit before it could answer. Give it a minute, then ask again.',
+    };
+  }
+  if (/API_KEY|authentication|unauthor|401|403/i.test(detail)) {
+    return {
+      code: 'INTERNAL',
+      message: 'The demo is not fully configured right now, so answering is unavailable. This is our problem, not yours.',
+    };
+  }
+  return {
+    code: 'INTERNAL',
+    message: partial
+      ? 'The answer stopped partway through. Ask again and it will usually go through.'
+      : 'That answer could not be started. Ask again and it will usually go through.',
+  };
+}
 
 router.post('/api/sessions/:id/messages', async (req: Request, res: Response) => {
   allowAnyOrigin(res);
@@ -226,10 +282,15 @@ router.post('/api/sessions/:id/messages', async (req: Request, res: Response) =>
   // Validation passed and the question is going to be answered, so spend it now.
   consumeRateLimit(ip, 'message');
 
-  const history = db.prepare(
-    'SELECT role, content FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT 6',
+  const recent = db.prepare(
+    'SELECT role, content FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT 8',
   ).all(id) as Array<{ role: 'user' | 'assistant'; content: string }>;
-  history.reverse();
+  recent.reverse();
+
+  // An answer that failed leaves its question stored with no reply. Replaying
+  // that orphan puts two questions in front of the model, and it answers the
+  // stale one. Keep only completed exchanges.
+  const history = pairedHistory(recent).slice(-6);
 
   db.prepare('INSERT INTO messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)')
     .run(id, 'user', message, Date.now());
@@ -242,7 +303,9 @@ router.post('/api/sessions/:id/messages', async (req: Request, res: Response) =>
       db, sessionId: id, domain: session.domain, question: message, history,
     })) {
       if (channel.closed) break;
-      if (event.type === 'token') {
+      if (event.type === 'status') {
+        channel.send('status', { stage: event.stage });
+      } else if (event.type === 'token') {
         answer += event.text;
         channel.send('token', { text: event.text });
       } else if (event.type === 'sources') {
@@ -257,25 +320,12 @@ router.post('/api/sessions/:id/messages', async (req: Request, res: Response) =>
       } else if (event.type === 'error') {
         // The visitor gets a plain message; the operator gets the real cause.
         console.error(`[chat] session=${id} ${event.message}`);
-        const misconfigured = /API_KEY|authentication|401/i.test(event.message);
-        channel.send('error', {
-          code: misconfigured ? 'INTERNAL' : 'INTERNAL',
-          message: misconfigured
-            ? 'The demo is not fully configured right now, so answering is unavailable. This is our problem, not yours.'
-            : answer.length > 0
-              ? 'The answer stopped partway through. Ask again and it will usually go through.'
-              : 'That answer could not be started. Ask again and it will usually go through.',
-        });
+        channel.send('error', chatError(event.message, answer.length > 0));
       }
     }
   } catch (err) {
     console.error(`[chat] session=${id}`, err);
-    channel.send('error', {
-      code: 'INTERNAL',
-      message: answer.length > 0
-        ? 'The answer stopped partway through. Ask again and it will usually go through.'
-        : 'That answer could not be started. Ask again and it will usually go through.',
-    });
+    channel.send('error', chatError(err instanceof Error ? err.message : String(err), answer.length > 0));
   } finally {
     channel.close();
   }
@@ -306,16 +356,29 @@ router.get('/admin/stats', (req: Request, res: Response) => {
   `).all(dayStart.getTime()) as Array<{ kind: string; model: string; input: number; output: number; calls: number }>;
 
   // Published rates. Embedding cost is per input token only.
+  // USD per token. Keyed by the real model id rather than by whatever is
+  // configured: keying on config.chatModel priced every provider's model at
+  // Claude Haiku's rate. Unknown models are surfaced below instead of being
+  // silently costed at zero.
+  const M = 1_000_000;
   const RATES: Record<string, { in: number; out: number }> = {
-    'text-embedding-3-small': { in: 0.02 / 1_000_000, out: 0 },
-    'voyage-3-lite': { in: 0.02 / 1_000_000, out: 0 },
-    [config.chatModel]: { in: 1 / 1_000_000, out: 5 / 1_000_000 },
+    'text-embedding-3-small': { in: 0.02 / M, out: 0 },
+    'voyage-3-lite': { in: 0.02 / M, out: 0 },
+    'hash-dev': { in: 0, out: 0 },
+    'claude-haiku-4-5': { in: 1 / M, out: 5 / M },
+    'claude-haiku-4-5-20251001': { in: 1 / M, out: 5 / M },
+    'gemini-3.5-flash-lite': { in: 0.30 / M, out: 2.50 / M },
+    'gemini-3.5-flash': { in: 1.50 / M, out: 9.00 / M },
+    'gemini-2.5-flash-lite': { in: 0.10 / M, out: 0.40 / M },
+    'gemini-2.5-flash': { in: 0.30 / M, out: 2.50 / M },
   };
+  const unpriced: string[] = [];
 
   let estimatedCostUsd = 0;
   for (const u of usage) {
     const rate = RATES[u.model];
     if (rate) estimatedCostUsd += (u.input ?? 0) * rate.in + (u.output ?? 0) * rate.out;
+    else if (!unpriced.includes(u.model)) unpriced.push(u.model);
   }
 
   res.json({
@@ -325,6 +388,8 @@ router.get('/admin/stats', (req: Request, res: Response) => {
       messages: (db.prepare("SELECT COUNT(*) AS n FROM messages WHERE role = 'user' AND created_at >= ?").get(dayStart.getTime()) as { n: number }).n,
       usage,
       estimatedCostUsd: Number(estimatedCostUsd.toFixed(4)),
+      // Named explicitly so a model with no rate cannot quietly read as free.
+      unpricedModels: unpriced,
     },
     live: { running: runningCount(), queued: queueDepth() },
     totals: {
@@ -332,8 +397,8 @@ router.get('/admin/stats', (req: Request, res: Response) => {
       chunks: (db.prepare('SELECT COUNT(*) AS n FROM chunks').get() as { n: number }).n,
     },
     config: {
-      chatModel: config.chatModel,
-      embeddingModel: config.embeddingModel,
+      chatModel: `${resolveChat().provider}/${resolveChat().model}`,
+      embeddingModel: resolveEmbedding().model,
       maxPages: config.maxPages,
       concurrentCrawls: config.concurrentCrawls,
     },

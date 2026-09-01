@@ -2,7 +2,7 @@ export interface PageEvent {
   url: string; title: string; status: string; charCount: number;
 }
 export interface ProgressEvent {
-  pagesFetched: number; pagesQueued: number; chunks: number; stage: string;
+  pagesFetched: number; pagesQueued: number; chunks: number; embedded: number; stage: string;
 }
 export interface ReadyEvent {
   pages: number; chunks: number; elapsedMs: number; skipped: number;
@@ -99,7 +99,10 @@ export function subscribeToIndex(sessionId: string, handlers: IndexHandlers): ()
   return () => source.close();
 }
 
+export type AnswerStage = 'retrieving' | 'generating';
+
 export interface MessageHandlers {
+  onStatus?: (stage: AnswerStage) => void;
   onToken: (text: string) => void;
   onSources: (sources: Source[]) => void;
   onDone: (info: { messagesUsed: number; messagesAllowed: number }) => void;
@@ -152,7 +155,8 @@ export async function sendMessage(
     let data: unknown;
     try { data = JSON.parse(dataLines.join('\n')); } catch { return; }
 
-    if (event === 'token') handlers.onToken((data as { text: string }).text);
+    if (event === 'status') handlers.onStatus?.((data as { stage: AnswerStage }).stage);
+    else if (event === 'token') handlers.onToken((data as { text: string }).text);
     else if (event === 'sources') handlers.onSources((data as { sources: Source[] }).sources);
     else if (event === 'done') handlers.onDone(data as { messagesUsed: number; messagesAllowed: number });
     else if (event === 'error') handlers.onError(data as ErrorEvent);
