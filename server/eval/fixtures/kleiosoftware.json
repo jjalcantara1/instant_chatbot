@@ -1,0 +1,22 @@
+{
+  "site": "https://kleiosoftware.com",
+  "note": "Answerable questions are grounded in pages this crawl actually indexes. Absent questions are the kind a visitor would plausibly ask a studio site, chosen so that the site genuinely does not cover them. If the site's content changes, re-check both lists before trusting a run.",
+  "questions": [
+    { "q": "Is Kleio a one-person studio or a big agency?", "answerable": true },
+    { "q": "What does the steel connections classifier do?", "answerable": true },
+    { "q": "Tell me about the Kinefolk Studio project.", "answerable": true },
+    { "q": "Where is Kleio based?", "answerable": true },
+    { "q": "Do you build custom AI models, or only websites?", "answerable": true },
+    { "q": "How is a custom website different from a template or page-builder site?", "answerable": true },
+    { "q": "What is the geotextile material predictor?", "answerable": true },
+    { "q": "Can I book a discovery call, and does it cost anything?", "answerable": true },
+    { "q": "Do you help students with thesis and capstone projects?", "answerable": true },
+    { "q": "Are the websites you build designed for mobile?", "answerable": true },
+
+    { "q": "What is your refund policy if I cancel halfway through a project?", "answerable": false },
+    { "q": "Does Kleio hold ISO 9001 certification?", "answerable": false },
+    { "q": "Who are Kleio's investors and funding partners?", "answerable": false },
+    { "q": "Do you offer 24/7 emergency phone support?", "answerable": false },
+    { "q": "What are the opening hours of your Manila office?", "answerable": false }
+  ]
+}

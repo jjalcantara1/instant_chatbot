@@ -1,0 +1,49 @@
+# Domains this public demo will not crawl. One per line; subdomains match too.
+# Rationale: link shorteners and redirectors (SSRF laundering), webhook/request
+# catchers (exfiltration targets), localhost tunnels (bridges into private
+# networks), and cloud metadata hostnames.
+
+localhost
+metadata.google.internal
+metadata.goog
+instance-data
+
+# Request / webhook catchers
+requestbin.net
+requestbin.com
+webhook.site
+pipedream.net
+beeceptor.com
+interact.sh
+oast.fun
+oastify.com
+burpcollaborator.net
+canarytokens.com
+
+# Localhost tunnels
+ngrok.io
+ngrok-free.app
+ngrok.app
+localtunnel.me
+loca.lt
+serveo.net
+trycloudflare.com
+localhost.run
+
+# Redirectors / shorteners
+bit.ly
+tinyurl.com
+t.co
+goo.gl
+ow.ly
+is.gd
+buff.ly
+rebrand.ly
+cutt.ly
+shorturl.at
+
+# Wildcard-DNS services that resolve any IP you encode into the hostname
+nip.io
+sslip.io
+xip.io
+httpbin.org

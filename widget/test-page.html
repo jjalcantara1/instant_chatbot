@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Hostile host page — widget isolation test</title>
+<style>
+  /* Everything here is deliberately antagonistic. The widget must survive all of it. */
+  * { box-sizing: content-box !important; }
+  html { font-size: 26px; }
+  body {
+    font-family: "Comic Sans MS", cursive;
+    font-size: 22px;
+    line-height: 3.4;
+    letter-spacing: 2px;
+    background: #2b0b3a;
+    color: #ffe600;
+    margin: 0;
+    padding: 24px;
+  }
+  div { border: 3px dashed #ff00cc; padding: 14px; }
+  button { background: red !important; color: lime !important; font-size: 32px !important;
+           border-radius: 40px !important; padding: 30px !important; text-transform: uppercase !important; }
+  input { background: #00ff00 !important; border: 8px solid orange !important; font-size: 30px !important; }
+  svg { width: 200px !important; height: 200px !important; }
+  a { color: #ff0000 !important; text-decoration: overline underline !important; }
+  form { display: block !important; transform: rotate(2deg); }
+  /* A high z-index overlay that must not cover the widget */
+  .overlay { position: fixed; inset: 0; z-index: 999999; pointer-events: none;
+             background: repeating-linear-gradient(45deg, #0000, #0000 20px, rgba(255,0,204,.12) 20px, rgba(255,0,204,.12) 40px); }
+  header, section, p { all: unset; display: block; }
+</style>
+</head>
+<body>
+  <div class="overlay"></div>
+  <h1>A deliberately hostile page</h1>
+  <p>Global CSS here overrides box-sizing, fonts, buttons, inputs, SVG sizing and z-index.
+     The chat widget in the bottom-right corner should be completely unaffected.</p>
+  <div>
+    <button>A host page button, for comparison</button>
+    <input value="A host page input" />
+  </div>
+
+  <!-- The snippet exactly as a visitor would paste it -->
+  <script src="SCRIPT_SRC" data-session="SESSION_ID" async></script>
+</body>
+</html>

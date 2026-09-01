@@ -1,0 +1,23 @@
+# Caddy terminates TLS and forwards to the Node process.
+sitechat.kleio-software.dev {
+	encode gzip
+
+	# SSE must not be buffered; the crawl log is the product.
+	@sse path /api/sessions/*/events /api/sessions/*/messages
+	reverse_proxy @sse localhost:8080 {
+		flush_interval -1
+	}
+
+	reverse_proxy localhost:8080
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
+
+	log {
+		output file /var/log/caddy/sitechat.log
+		format json
+	}
+}

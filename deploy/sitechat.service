@@ -1,0 +1,42 @@
+# /etc/systemd/system/sitechat.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now sitechat
+[Unit]
+Description=Instant Site Chat API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sitechat
+Group=sitechat
+WorkingDirectory=/srv/sitechat/server
+EnvironmentFile=/srv/sitechat/.env
+ExecStart=/usr/bin/node dist/index.js
+Restart=always
+RestartSec=3
+
+# The process fetches URLs supplied by strangers. Give it as little as possible.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+# The SQLite file and its WAL are the only things it may write.
+ReadWritePaths=/srv/sitechat/data
+# It must reach the public internet, but never the host's own loopback.
+IPAddressDeny=localhost link-local multicast
+IPAddressAllow=any
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sitechat
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,94 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --paper: #edf0f2;
+  --card: #f8fafb;
+  --ink: #0f151c;
+  --rule: #c3ccd4;
+  --signal: #1b44d8;
+  --good: #0b6e43;
+  --flag: #9b2c1e;
+  --muted: #5c6873;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #0e1319;
+    --card: #151b23;
+    --ink: #e6ecf2;
+    --rule: #2b3641;
+    --signal: #7d9bff;
+    --good: #4fbe8b;
+    --flag: #e08373;
+    --muted: #94a3b0;
+    color-scheme: dark;
+  }
+}
+
+html, body, #root { height: 100%; }
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: 'IBM Plex Sans', system-ui, sans-serif;
+  font-size: 15px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Every figure that changes is tabular, so counts tick in place. */
+.tnum { font-variant-numeric: tabular-nums; }
+
+.rule { border-color: var(--rule); }
+
+/* --- The crawl log: the one place boldness is spent --- */
+
+.logrow {
+  display: grid;
+  grid-template-columns: 2.5rem 1fr minmax(0, 14rem) 5rem;
+  gap: 0.75rem;
+  align-items: baseline;
+  padding: 0.3rem 0.75rem;
+  border-top: 1px solid var(--rule);
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 700px) {
+  .logrow { grid-template-columns: 2rem 1fr 4.5rem; }
+  .logrow .logtitle { display: none; }
+}
+
+/* A new row arrives: a brief wash, then nothing. No slide, no fade-up. */
+@keyframes arrive {
+  from { background-color: color-mix(in srgb, var(--signal) 12%, transparent); }
+  to   { background-color: transparent; }
+}
+.logrow-new { animation: arrive 900ms ease-out; }
+
+@keyframes blink { 50% { opacity: 0.25; } }
+.cursor { animation: blink 1s step-end infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .logrow-new, .cursor { animation: none; }
+  * { transition: none !important; }
+}
+
+/* Focus is visible and uses the one accent. */
+:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 2px;
+}
+
+input, button, textarea { font: inherit; color: inherit; }
+
+::placeholder { color: var(--muted); opacity: 1; }
+
+.scroll-thin::-webkit-scrollbar { width: 8px; height: 8px; }
+.scroll-thin::-webkit-scrollbar-thumb { background: var(--rule); border-radius: 4px; }
+.scroll-thin::-webkit-scrollbar-track { background: transparent; }

@@ -1,0 +1,26 @@
+{
+  "name": "instant-site-chat",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Paste your site URL, watch it get indexed live, chat with it in under a minute.",
+  "workspaces": [
+    "server",
+    "web",
+    "widget"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "npm --workspace server run dev",
+    "dev:web": "npm --workspace web run dev",
+    "build": "npm --workspace server run build && npm --workspace widget run build && npm --workspace web run build",
+    "crawl": "npm --workspace server run crawl --",
+    "eval": "npm --workspace server run eval --",
+    "test": "npm --workspace server run test"
+  },
+  "allowScripts": {
+    "better-sqlite3@12.11.1": true,
+    "esbuild@0.28.2": true
+  }
+}
