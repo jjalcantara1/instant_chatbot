@@ -155,6 +155,13 @@ export function App(): React.ReactElement {
     })();
   }, []);
 
+  // Stable identity: Chat polls for suggestions in an effect that depends on
+  // this, and a fresh closure each render would tear the timer down before it
+  // ever fired.
+  const replaceSession = useCallback((next: SessionDetail): void => {
+    setView({ kind: 'chat', session: next });
+  }, []);
+
   const reset = (): void => {
     teardown.current?.();
     history.replaceState(null, '', window.location.pathname);
@@ -173,7 +180,7 @@ export function App(): React.ReactElement {
           onReset={reset}
           // An expansion changes the page list, the counts and the frontier, so
           // the refreshed session replaces the one this screen was opened with.
-          onSession={(next) => setView({ kind: 'chat', session: next })}
+          onSession={replaceSession}
         />
       </div>
     );

@@ -1,0 +1,22 @@
+<!--
+  Site Chat tab icon.
+
+  Glyph after Lucide's `message-square-text` (ISC licence,
+  https://lucide.dev — Copyright (c) for portions of Lucide are held by
+  Cole Bemis 2013-2022 as part of Feather, MIT).
+
+  Redrawn as filled geometry rather than strokes. The source icon is a 2px
+  stroke on a 24-unit grid; at a 16px favicon that lands near one device pixel
+  and smears, whereas a solid bubble with knocked-out slots keeps its
+  silhouette. Colours are --accent and --paper from web/src/index.css.
+
+  favicon.ico and apple-touch-icon.png are generated from this geometry by
+  web/tools/make-favicon.py.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="Site Chat">
+  <rect width="24" height="24" rx="5" fill="#5B2A86"/>
+  <path d="M6 12.5 L4 20.8 L12.2 15.6 Z" fill="#F7F5F1"/>
+  <rect x="3.4" y="3.6" width="17.2" height="12.5" rx="3.2" fill="#F7F5F1"/>
+  <rect x="6.8" y="7.3" width="10.4" height="2" rx="1" fill="#5B2A86"/>
+  <rect x="6.8" y="11.4" width="7.6" height="2" rx="1" fill="#5B2A86"/>
+</svg>

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   expandSession, getSession, sendMessage, subscribeToIndex,
   type AnswerStage, type ApiError, type PageEvent, type SessionDetail, type Source,
+
 } from './api';
 
 interface Turn {
@@ -16,17 +17,6 @@ function shortPath(url: string): string {
     const u = new URL(url);
     return u.pathname === '/' ? '/' : u.pathname.replace(/\/$/, '');
   } catch { return url; }
-}
-
-/**
- * Page titles are written for search engines. Strip the brand tail and the
- * descriptive half so a suggestion reads like something a person would ask.
- */
-function cleanTitle(title: string): string {
-  const head = title.split(/\s+[|–—·]\s+/)[0]?.trim() ?? title.trim();
-  const kept = head.length >= 3 ? head : title.trim();
-  const lead = (kept.split(/:\s+/)[0] ?? kept).trim();
-  return lead.length >= 3 ? lead : kept;
 }
 
 /** Renders [1] citation markers as footnote references rather than raw text. */
@@ -222,11 +212,40 @@ export function Chat({ session, onReset, onSession }: {
     return new Set((last?.sources ?? []).map((s) => s.url));
   }, [turns]);
 
-  // Derived from real indexed pages rather than invented copy.
-  const starters = useMemo(
-    () => okPages.filter((p) => p.title).slice(0, 3).map((p) => `Tell me about ${cleanTitle(p.title)}`),
-    [okPages],
-  );
+  /**
+   * Suggestions come from the server, which has already run each one through
+   * the same retrieval gate that will answer it. They are never derived from
+   * page titles here: a title-derived question ("Tell me about FAQ") embeds to
+   * almost nothing and gets refused, and offering a question the app then
+   * refuses is worse than offering none.
+   */
+  const starters = session.starters;
+
+  // Verification is one embedding request, which on a rate-limited key can
+  // land well after the index is ready. Poll while the server says it is still
+  // coming, and stop as soon as the visitor asks something of their own.
+  useEffect(() => {
+    if (!session.startersPending || turns.length > 0) return;
+    let cancelled = false;
+    let tries = 0;
+
+    const id = window.setInterval(() => {
+      tries++;
+      if (tries > 8) { window.clearInterval(id); return; }
+      void (async () => {
+        try {
+          const next = await getSession(session.sessionId);
+          if (cancelled) return;
+          if (!next.startersPending) {
+            window.clearInterval(id);
+            onSession(next);
+          }
+        } catch { /* a failed poll just tries again */ }
+      })();
+    }, 4000);
+
+    return () => { cancelled = true; window.clearInterval(id); };
+  }, [session.sessionId, session.startersPending, turns.length, onSession]);
 
   useEffect(() => {
     scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: 'smooth' });
@@ -383,11 +402,11 @@ export function Chat({ session, onReset, onSession }: {
                 <div className="mt-6 max-w-[540px] border-t rule">
                   {starters.map((q) => (
                     <button
-                      key={q}
-                      onClick={() => void ask(q)}
+                      key={q.text}
+                      onClick={() => void ask(q.text)}
                       className="w-full flex items-baseline justify-between gap-5 py-[14px] border-b rule text-left text-[15px]"
                     >
-                      <span>{q}</span>
+                      <span>{q.text}</span>
                       <span className="text-[12px] text-[var(--accent)] whitespace-nowrap">ask →</span>
                     </button>
                   ))}

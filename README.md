@@ -37,6 +37,7 @@ deploy/   systemd unit, Caddyfile, provisioning and backup scripts
 - [Development commands](#development-commands)
 - [Deploying](#deploying)
 - [Limits and cost](#limits-and-cost)
+- [Credits](#credits)
 - [Testing](#testing)
 
 ---
@@ -324,6 +325,65 @@ declining (a citation asserts the site genuinely says this), and
 `parseCitations` maps `[n]` markers back to real pages, so a hallucinated
 citation number resolves to nothing rather than to a plausible wrong link.
 
+### Suggested questions are verified, not guessed
+
+The empty transcript offers three opening questions. They used to be built in
+the browser from page titles, which produced the worst possible outcome: the
+app suggesting a question and then refusing it.
+
+The failure was reproducible. Trimming the brand tail off
+`FAQ: Custom Websites & AI Models in Pampanga | Kleio` left the bare token
+**"FAQ"**, and `Tell me about FAQ` carries so little meaning that nothing
+cleared the cosine floor — the deterministic refusal fired without the model
+ever being called.
+
+Measured against voyage-3-lite on a real index:
+
+| Candidate style | Cleared the gate | Lowest top-cosine (floor 0.35) |
+|---|---|---|
+| Full heading path | 48/48 | 0.450 |
+| Question-shaped heading, verbatim | 41/45 | 0.445 |
+| Last heading segment | 15/18 | 0.000 |
+| Page title *(what it used to do)* | 4/4 | **0.379** |
+
+Heading-derived questions clear the floor by 0.10 or more; title-derived ones
+cleared it by as little as 0.029. But margin is not a guarantee — one candidate
+scored a top cosine of **0.736 and was still refused**, because only one chunk
+cleared the floor and `minChunksForAnswer` is 2.
+
+So candidates are generated generously and then run through *the very same
+gate that will answer them*, and only survivors are ever shown:
+
+```mermaid
+flowchart TB
+    H["question-shaped headings<br/>verbatim"] --> POOL
+    H2["other headings<br/>'Tell me about X'"] --> POOL
+    G["generic probes<br/>'How much does it cost?'"] --> POOL
+    T["page title subject<br/>(last resort)"] --> POOL
+    POOL["up to 24 candidates"] --> FILTER["drop nav furniture,<br/>hero copy, calls to action"]
+    FILTER --> EMB["ONE embedding request<br/>for all of them"]
+    EMB --> GATE{"rankWithVector:<br/>the real gate"}
+    GATE -->|refused| DROP["never shown"]
+    GATE -->|answers| PICK["cover every page first,<br/>then fill remaining slots"]
+    PICK --> OUT["at most 3, stored on the session"]
+
+    style DROP fill:#9B2C1E,color:#fff
+    style OUT fill:#5B2A86,color:#fff
+```
+
+Two details make this affordable. `rankWithVector` splits the ranking half of
+`retrieve` from the embedding half, so checking twenty-four candidates costs
+**one** HTTP request rather than twenty-four — the arithmetic is a dot product
+over vectors already in memory, and round trips are the scarce resource on a
+rate-limited key. And the wait is bounded: `ready` fires without the
+suggestions if verification has not landed in 2.5 s, the client polls while
+`startersPending` is true, and an index that works is never failed because the
+extra call for its suggestions did not.
+
+If nothing can be verified, nothing is offered. A landing page that is all hero
+copy legitimately yields one suggestion or none, and that is the honest answer
+rather than three buttons that lead to a refusal.
+
 ---
 
 ## Security: the SSRF guard
@@ -564,7 +624,7 @@ npm run crawl -- https://example.com --max 1  # what the default index actually 
 npm --workspace server run index-site -- URL  # crawl + chunk + embed into SQLite
 npm --workspace server run dump -- SESSION_ID # print a session's chunks to read
 npm run eval                                  # the retrieval-honesty gate
-npm test                                      # 87 tests
+npm test                                      # 100 tests
 ```
 
 `npm run crawl` reports the frontier, which is the fastest way to see what a
@@ -653,10 +713,24 @@ at Claude Haiku's rate, and a model with no published rate is listed under
 
 ---
 
+## Credits
+
+The tab icon is after Lucide's [`message-square-text`](https://lucide.dev/icons/message-square-text)
+(ISC licence; portions derive from Feather, MIT). It is redrawn as filled
+geometry rather than strokes in [web/public/favicon.svg](web/public/favicon.svg):
+the source icon is a 2px stroke on a 24-unit grid, which at a 16px favicon
+lands near one device pixel and smears, whereas a solid bubble with knocked-out
+text slots keeps its silhouette. `web/tools/make-favicon.py` regenerates the
+`.ico` (16/24/32/48/64, the smallest carrying a single thicker text slot
+because two smear together at that size) and the 180px apple-touch icon from
+the same geometry.
+
+Type is [Archivo](https://fonts.google.com/specimen/Archivo) (OFL).
+
 ## Testing
 
 ```bash
-npm test          # 87 tests, no API key required
+npm test          # 100 tests, no API key required
 npm run eval      # retrieval honesty against real embeddings — needs a key
 ```
 
@@ -664,6 +738,7 @@ npm run eval      # retrieval honesty against real embeddings — needs a key
 |---|---:|---|
 | `ssrf.test.ts` | 20 | CIDR blocks, IP literals, internal TLDs, IPv4-mapped IPv6, DNS pinning |
 | `errors.test.ts` | 10 | Every failure code and message; the frontier's persistence, dedupe and expansion semantics |
+| `starters.test.ts` | 13 | Every suggested question is asked back through the real gate |
 | `retrieval-gate.test.ts` | 10 | The cosine floor and the ≥2-chunk rule, offline |
 | `redirect.test.ts` | 6 | Seed resolution, off-site redirects, hop limits |
 | `history.test.ts` | 6 | Pairing user turns to answers, dropping orphans |
@@ -673,5 +748,5 @@ npm run eval      # retrieval honesty against real embeddings — needs a key
 The tests that matter most are the ones asserting things the product would
 quietly survive being wrong about: that a refusal never cites a page, that an
 absent question is never answered, that a frontier never re-offers a page
-already read, and that no visitor-facing message ever degrades to "something
-went wrong".
+already read, that a suggested question is never one the app would refuse, and
+that no visitor-facing message ever degrades to "something went wrong".

@@ -3,6 +3,8 @@ import { crawl, type CrawledPage, type FrontierEntry } from '../crawl/crawler.js
 import { findBoilerplateLines, stripBoilerplate } from './boilerplate.js';
 import { chunkPage, type Chunk } from './chunk.js';
 import { embedBatched, getEmbedder, toBlob, type Embedder } from './embed.js';
+import { generateStarters } from '../retrieve/starters.js';
+import { invalidateSession } from '../retrieve/retrieve.js';
 import type { DB } from '../db.js';
 
 export type IndexEvent =
@@ -280,6 +282,11 @@ export async function runIndex(opts: RunIndexOptions): Promise<IndexResult> {
     ).run(sessionId, 'embed', embedder.name, embedTokens, 0, Date.now());
   }
 
+  // Suggestions are computed from chunks that are now committed, so the
+  // retrieval cache has to be dropped before they are verified against it.
+  invalidateSession(sessionId);
+  await refreshStarters(db, sessionId, embedder);
+
   const frontierSize = countFrontier(db, sessionId);
   const elapsedMs = Date.now() - started;
   emit({
@@ -302,6 +309,77 @@ export async function runIndex(opts: RunIndexOptions): Promise<IndexResult> {
     embedTokens,
     frontier: frontierSize,
   };
+}
+
+/**
+ * How long `ready` will wait on suggestion verification before going ahead
+ * without it.
+ *
+ * Verification is one embedding request. On a normal key that is a couple of
+ * hundred milliseconds and the suggestions are present the moment the chat
+ * screen opens. On a rate-limited key (EMBEDDING_MIN_INTERVAL_MS) the request
+ * can be pinned behind a 21-second pacing gate, and making the visitor watch a
+ * finished index for 21 more seconds to gain three buttons is a bad trade. So
+ * the wait is bounded: past it the index is reported ready and the suggestions
+ * land in the background, where the client picks them up.
+ */
+const STARTERS_WAIT_MS = 2_500;
+
+/**
+ * Starter jobs still in flight after `ready` was reported.
+ *
+ * The long-lived server never closes its database handle, so a job outliving
+ * the call that started it is fine there. A short-lived caller - the CLIs, a
+ * test - closes as soon as it is done, and would pull the connection out from
+ * under the write. `settleStarters` is how those callers wait.
+ */
+const pendingStarters = new Set<Promise<void>>();
+
+/** Wait for any background suggestion work. Call before closing a database. */
+export async function settleStarters(): Promise<void> {
+  await Promise.allSettled([...pendingStarters]);
+}
+
+/**
+ * Compute and store this session's suggested questions.
+ *
+ * Never throws. Suggestions are a nicety; an index that works must not be
+ * failed because the extra embedding call for them did not.
+ */
+async function refreshStarters(db: DB, sessionId: string, embedder: Embedder): Promise<void> {
+  const store = (starters: Array<{ text: string; url: string }>): void => {
+    // The wait below is bounded, so this can land after the caller has moved
+    // on and closed up. A closed handle is that caller's business, not a fault
+    // worth logging.
+    if (!db.open) return;
+    try {
+      db.prepare('UPDATE sessions SET starters = ? WHERE id = ?')
+        .run(JSON.stringify(starters), sessionId);
+    } catch (e) {
+      console.error(`[starters ${sessionId}] could not be stored:`, e);
+    }
+  };
+
+  const job = generateStarters(db, sessionId, embedder)
+    .then(store)
+    .catch((e: unknown) => {
+      // An empty array, not a null: the client should stop waiting rather than
+      // sit on a pending state forever.
+      console.error(`[starters ${sessionId}] failed:`, e);
+      store([]);
+    })
+    .finally(() => { pendingStarters.delete(job); });
+
+  pendingStarters.add(job);
+
+  let timer: NodeJS.Timeout | undefined;
+  const bounded = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, STARTERS_WAIT_MS);
+    timer.unref?.();
+  });
+
+  await Promise.race([job, bounded]);
+  if (timer) clearTimeout(timer);
 }
 
 /**

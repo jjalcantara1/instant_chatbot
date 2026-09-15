@@ -8,7 +8,7 @@
  */
 import { customAlphabet } from 'nanoid';
 import { openDb } from '../db.js';
-import { runIndex, IndexError } from '../indexing/pipeline.js';
+import { runIndex, settleStarters, IndexError } from '../indexing/pipeline.js';
 import { closeFetcher } from '../crawl/fetcher.js';
 import { config } from '../config.js';
 
@@ -71,6 +71,9 @@ try {
     throw e;
   }
 } finally {
+  // Suggestion verification is allowed to outlive `ready`; wait for it before
+  // pulling the database out from under it.
+  await settleStarters();
   await closeFetcher();
   db.close();
 }

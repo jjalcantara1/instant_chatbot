@@ -94,6 +94,11 @@ const SESSION_COLUMNS: Array<[string, string]> = [
   ['page_budget', 'INTEGER NOT NULL DEFAULT 1'],
   // 1 once sitemap discovery has run, so it is paid for at most once.
   ['discovered', 'INTEGER NOT NULL DEFAULT 0'],
+  // JSON array of suggested questions, each already verified to clear the
+  // retrieval gate. NULL means "not computed yet", which is not the same as
+  // the empty array ("computed, nothing survived") - the client shows a
+  // pending state for one and nothing at all for the other.
+  ['starters', 'TEXT'],
 ];
 
 function migrate(db: Database.Database): void {

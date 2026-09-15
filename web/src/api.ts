@@ -33,6 +33,16 @@ export interface SessionDetail {
   maxPages: number;
   /** Default size of one "read more". */
   expandStep: number;
+  /** Opening questions the server has verified it can actually answer. */
+  starters: Starter[];
+  /** True while verification is still running, so an empty list is not final. */
+  startersPending: boolean;
+}
+
+/** A suggested opening question, already verified server-side as answerable. */
+export interface Starter {
+  text: string;
+  url: string;
 }
 
 export interface Source {

@@ -17,6 +17,24 @@ interface SessionRow {
   page_count: number; chunk_count: number; error: string | null;
   created_at: number; expires_at: number;
   page_budget: number; discovered: number;
+  starters: string | null;
+}
+
+/**
+ * Suggested questions, every one already verified to clear the retrieval gate.
+ * NULL in the column means verification has not finished, which the client
+ * shows differently from an empty list - see `startersPending` below.
+ */
+function parseStarters(raw: string | null): Array<{ text: string; url: string }> {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (s): s is { text: string; url: string } =>
+        typeof (s as { text?: unknown }).text === 'string',
+    );
+  } catch { return []; }
 }
 
 /** Pages discovered but not yet read - the size of the "read more" offer. */
@@ -121,6 +139,11 @@ router.get('/api/sessions/:id', (req: Request, res: Response) => {
     pageBudget: session.page_budget,
     maxPages: config.maxPages,
     expandStep: config.expandStep,
+    starters: parseStarters(session.starters),
+    // Verification is one embedding request and can be held behind a pacing
+    // gate on a rate-limited key, so the index goes ready without it. The
+    // client polls while this is true rather than concluding there are none.
+    startersPending: session.starters === null && session.status !== 'failed',
     // Where widget.js is actually served from. The frontend is deployed to
     // Firebase Hosting while the API lives on the VPS, so the page's own
     // origin is the wrong base for the embed snippet.

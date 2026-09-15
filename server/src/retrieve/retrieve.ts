@@ -105,6 +105,27 @@ export async function retrieve(
   const qv = vectors[0];
   if (!qv) return { chunks: [], insufficient: true };
 
+  return rankWithVector(db, sessionId, query, qv);
+}
+
+/**
+ * The ranking half of `retrieve`, given a query vector that has already been
+ * computed.
+ *
+ * Split out so a caller with several queries can embed them in one request and
+ * then rank each locally. That matters on a rate-limited embedding key, where
+ * the cost of checking N questions is the number of HTTP round trips, not the
+ * arithmetic — the arithmetic is a dot product over vectors already in memory.
+ */
+export function rankWithVector(
+  db: DB,
+  sessionId: string,
+  query: string,
+  qv: Float32Array,
+): RetrievalResult {
+  const index = loadSessionIndex(db, sessionId);
+  if (index.chunks.length === 0) return { chunks: [], insufficient: true };
+
   // Rank A: dense.
   const cosines = new Map<number, number>();
   for (const c of index.chunks) cosines.set(c.id, dot(qv, c.vector));
