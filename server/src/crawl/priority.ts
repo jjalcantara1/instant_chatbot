@@ -60,5 +60,15 @@ export class PriorityQueue<T> {
     return this.items.shift()?.value;
   }
 
+  /**
+   * Everything still queued, best first, leaving the queue empty. A crawl that
+   * stops at its page cap has usually discovered far more than it read; that
+   * remainder is the frontier a later pass resumes from instead of re-walking
+   * the site from the root.
+   */
+  drain(): Array<{ value: T; score: number }> {
+    return this.items.splice(0, this.items.length);
+  }
+
   get size(): number { return this.items.length; }
 }

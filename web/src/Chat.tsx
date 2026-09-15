@@ -1,5 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { sendMessage, type AnswerStage, type PageEvent, type SessionDetail, type Source } from './api';
+import {
+  expandSession, getSession, sendMessage, subscribeToIndex,
+  type AnswerStage, type ApiError, type PageEvent, type SessionDetail, type Source,
+} from './api';
 
 interface Turn {
   role: 'user' | 'assistant';
@@ -112,6 +115,63 @@ function EmbedSnippet({ sessionId, widgetOrigin }: { sessionId: string; widgetOr
   );
 }
 
+interface ReadMoreState {
+  /** Pages read so far by the pass currently running, or null when idle. */
+  progress: number | null;
+  note: string | null;
+}
+
+/**
+ * The other half of the one-page default: reading more, after the fact, for
+ * the cost of the new pages only.
+ *
+ * The first crawl left behind every URL it discovered and had no budget for,
+ * so this does not re-walk the site — it resumes from that list. The existing
+ * index stays live throughout, which is why the transcript is not interrupted
+ * and the input is never disabled while it runs.
+ */
+function ReadMore({ session, state, onRead, compact }: {
+  session: SessionDetail;
+  state: ReadMoreState;
+  onRead: () => void;
+  compact?: boolean;
+}): React.ReactElement | null {
+  const running = state.progress !== null;
+  const step = Math.min(session.expandStep, session.headroom);
+
+  // Nothing found and no room to look: there is no honest offer to make.
+  if (!running && state.note === null && (session.headroom <= 0 || session.frontier === 0)) {
+    return null;
+  }
+
+  const found = session.frontier === 1 ? '1 more page found' : `${session.frontier} more pages found`;
+
+  return (
+    <div className={compact ? 'text-[12px]' : 'mt-4 pt-4 border-t rule text-[12px]'}>
+      {running ? (
+        <span className="text-[var(--muted)]" role="status" aria-live="polite">
+          reading{state.progress ? ` · ${state.progress} read` : ''}
+          <span className="dots" aria-hidden="true" />
+        </span>
+      ) : (
+        <>
+          {session.frontier > 0 && (
+            <span className="text-[var(--muted)]">{found}</span>
+          )}
+          {step > 0 && session.frontier > 0 && (
+            <button onClick={onRead} className={`link-accent ${compact ? 'ml-3' : 'block mt-1.5'}`}>
+              read {step} more →
+            </button>
+          )}
+          {state.note && (
+            <p className="mt-1.5 text-[var(--muted)]">{state.note}</p>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 function PathList({ pages, cited }: { pages: PageEvent[]; cited: Set<string> }): React.ReactElement {
   return (
     <div className="mt-3 flex flex-col gap-[7px] font-mono text-[12px]">
@@ -135,7 +195,11 @@ function PathList({ pages, cited }: { pages: PageEvent[]; cited: Set<string> }):
   );
 }
 
-export function Chat({ session, onReset }: { session: SessionDetail; onReset: () => void }): React.ReactElement {
+export function Chat({ session, onReset, onSession }: {
+  session: SessionDetail;
+  onReset: () => void;
+  onSession: (next: SessionDetail) => void;
+}): React.ReactElement {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
@@ -143,8 +207,12 @@ export function Chat({ session, onReset }: { session: SessionDetail; onReset: ()
   const [used, setUsed] = useState(session.messagesUsed);
   const [capped, setCapped] = useState(false);
   const [listOpen, setListOpen] = useState(false);
+  const [more, setMore] = useState<ReadMoreState>({ progress: null, note: null });
   const scroller = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const expandFeed = useRef<(() => void) | null>(null);
+
+  useEffect(() => () => expandFeed.current?.(), []);
 
   const okPages = useMemo(() => session.pages.filter((p) => p.status === 'ok'), [session.pages]);
 
@@ -163,6 +231,50 @@ export function Chat({ session, onReset }: { session: SessionDetail; onReset: ()
   useEffect(() => {
     scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: 'smooth' });
   }, [turns]);
+
+  /**
+   * Expansion reports over the same event stream as the first crawl, because
+   * the server runs it as a job under the same session id. When it lands, the
+   * whole session is refetched rather than patched: page list, counts and the
+   * remaining frontier all move together, and one of them going stale would
+   * show up as a "read more" that offers pages already in the index.
+   */
+  const readMore = async (): Promise<void> => {
+    if (more.progress !== null) return;
+    setMore({ progress: 0, note: null });
+
+    const finish = (note: string | null): void => {
+      expandFeed.current?.();
+      expandFeed.current = null;
+      setMore({ progress: null, note });
+    };
+
+    try {
+      await expandSession(session.sessionId, session.expandStep);
+    } catch (e) {
+      finish((e as ApiError).message);
+      return;
+    }
+
+    expandFeed.current = subscribeToIndex(session.sessionId, {
+      onPage: (p) => {
+        if (p.status === 'ok') setMore((m) => ({ ...m, progress: (m.progress ?? 0) + 1 }));
+      },
+      onProgress: () => {},
+      onReady: () => {
+        void (async () => {
+          try {
+            const next = await getSession(session.sessionId);
+            onSession(next);
+            finish(next.frontier === 0 ? 'That is every page this crawler can find.' : null);
+          } catch {
+            finish('Those pages were read, but the page list could not be refreshed. Reload to see them.');
+          }
+        })();
+      },
+      onError: (e) => finish(e.message),
+    });
+  };
 
   const ask = async (question: string): Promise<void> => {
     if (!question.trim() || busy) return;
@@ -207,6 +319,7 @@ export function Chat({ session, onReset }: { session: SessionDetail; onReset: ()
         <div className="min-h-0 overflow-y-auto scroll-thin -mr-2 pr-2">
           <PathList pages={okPages} cited={cited} />
         </div>
+        <ReadMore session={session} state={more} onRead={() => void readMore()} />
         <div className="mt-auto pt-[26px]">
           <EmbedSnippet sessionId={session.sessionId} widgetOrigin={session.widgetOrigin} />
           <p className="mt-[18px] text-[12px] leading-[1.55] text-[var(--muted)]">
@@ -239,7 +352,9 @@ export function Chat({ session, onReset }: { session: SessionDetail; onReset: ()
             </button>
           </div>
           <p className="hidden md:block mt-[7px] text-[13px] text-[var(--muted)]">
-            Reading {session.pageCount} pages. Ask it something you already know the answer to.
+            {session.pageCount === 1
+              ? 'Reading the landing page. Ask it something you already know the answer to.'
+              : `Reading ${session.pageCount} pages. Ask it something you already know the answer to.`}
           </p>
           <div className="md:hidden mt-2 flex items-baseline justify-between text-[12px] text-[var(--muted)]">
             <span>{okPages.length} pages indexed</span>
@@ -252,6 +367,9 @@ export function Chat({ session, onReset }: { session: SessionDetail; onReset: ()
               <PathList pages={okPages} cited={cited} />
             </div>
           )}
+          <div className="md:hidden mt-1.5">
+            <ReadMore session={session} state={more} onRead={() => void readMore()} compact />
+          </div>
         </header>
 
         <div

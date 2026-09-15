@@ -67,6 +67,8 @@ function Elapsed({ from, running }: { from: number; running: boolean }): React.R
 
 export interface CrawlLogProps {
   domain: string;
+  /** Page budget this run was started with. */
+  target: number;
   pages: PageEvent[];
   chunks: number;
   embedded: number;
@@ -84,7 +86,7 @@ const FADE = [1, 1, 1, 1, 1, 0.62, 0.4, 0.2];
 const fadeAt = (i: number): number => FADE[i] ?? 0.15;
 
 export function CrawlLog(props: CrawlLogProps): React.ReactElement {
-  const { domain, pages, chunks, embedded, queued, stage, startedAt, lastEventAt, running } = props;
+  const { domain, target, pages, chunks, embedded, queued, stage, startedAt, lastEventAt, running } = props;
 
   const recent = [...pages].reverse().slice(0, VISIBLE);
 
@@ -93,9 +95,14 @@ export function CrawlLog(props: CrawlLogProps): React.ReactElement {
 
   return (
     <>
-      <div className="flex justify-between items-baseline px-[18px] pt-4 pb-3 md:px-12 md:pt-[22px] md:pb-5">
+      <div className="flex justify-between items-baseline gap-4 px-[18px] pt-4 pb-3 md:px-12 md:pt-[22px] md:pb-5">
         <span className="font-mono text-[13px] md:text-[14px] truncate">{domain}</span>
-        <span className="font-mono text-[13px] md:text-[14px] text-[var(--muted)]">
+        <span className="flex items-baseline gap-4 font-mono text-[13px] md:text-[14px] text-[var(--muted)] shrink-0">
+          {/* What the run is working towards. Without it the counters climb
+              against nothing and a one-page crawl looks like it stalled. */}
+          <span className="hidden sm:inline">
+            {target === 1 ? 'landing page' : `up to ${target} pages`}
+          </span>
           <Elapsed from={startedAt} running={running} />
         </span>
       </div>
@@ -120,7 +127,9 @@ export function CrawlLog(props: CrawlLogProps): React.ReactElement {
           <Stat n={chunks} label="chunks built" />
           {showEmbedded
             ? <Stat n={embedded} label="embedded" />
-            : <Stat n={queued} label="in queue" />}
+            // On a one-page run nothing in the queue will ever be read, so it
+            // is not "in queue" — it is what a later "read more" can reach.
+            : <Stat n={queued} label={target === 1 ? 'pages found' : 'in queue'} />}
         </div>
       </div>
 

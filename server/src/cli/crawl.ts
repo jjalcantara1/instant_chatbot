@@ -16,10 +16,12 @@ function arg(name: string, fallback: number): number {
 
 const target = process.argv[2];
 if (!target || target.startsWith('--')) {
-  console.error('usage: npm run crawl -- <url> [--max N] [--timeout MS]');
+  console.error('usage: npm run crawl -- <url> [--max N] [--timeout MS]   (--max defaults to MAX_PAGES)');
   process.exit(1);
 }
 
+// The CLI is a diagnostic tool: you run it to see what the crawler can find,
+// so it defaults to the ceiling rather than to the one-page product default.
 const maxPages = arg('max', config.maxPages);
 const timeoutMs = arg('timeout', config.crawlTimeoutMs);
 
@@ -59,6 +61,8 @@ console.log(`sitemap urls    ${summary.sitemapCount}`);
 console.log(`pages fetched   ${summary.pages.length}  (ok ${ok.length} / empty ${empty.length} / error ${errored.length})`);
 console.log(`content         ${totalChars.toLocaleString()} chars, median ${median(ok.map((p) => p.charCount))}`);
 console.log(`stopped because ${summary.hitPageCap ? 'page cap' : summary.hitDeadline ? 'deadline' : 'queue drained'}`);
+console.log(`frontier        ${summary.frontier.length} discovered, unread` +
+  (summary.frontier.length ? `  (next: ${summary.frontier.slice(0, 3).map((f) => new URL(f.url).pathname).join(', ')})` : ''));
 const emptyRatio = summary.pages.length ? empty.length / summary.pages.length : 0;
 console.log(`empty ratio     ${(emptyRatio * 100).toFixed(0)}%${emptyRatio > 0.7 ? '  <-- would fail as SPA_DETECTED' : ''}`);
 console.log('='.repeat(72));

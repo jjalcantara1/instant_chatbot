@@ -16,6 +16,16 @@ CREATE TABLE IF NOT EXISTS sessions (
   expires_at   INTEGER NOT NULL
 );
 
+-- URLs discovered by a crawl but not read within its page budget, best first.
+-- This is what makes "read a few more pages" cost only the new pages: an
+-- expansion resumes from here instead of re-walking the site from the root.
+CREATE TABLE IF NOT EXISTS frontier (
+  session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  url         TEXT NOT NULL,
+  score       INTEGER NOT NULL,
+  PRIMARY KEY (session_id, url)
+);
+
 CREATE TABLE IF NOT EXISTS pages (
   id          INTEGER PRIMARY KEY,
   session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -62,6 +72,7 @@ CREATE TABLE IF NOT EXISTS usage_log (
   created_at   INTEGER NOT NULL
 );
 
+CREATE INDEX IF NOT EXISTS idx_frontier_session ON frontier(session_id, score DESC);
 CREATE INDEX IF NOT EXISTS idx_chunks_session ON chunks(session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON sessions(expires_at);
 CREATE INDEX IF NOT EXISTS idx_pages_session ON pages(session_id);
@@ -69,6 +80,30 @@ CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_usage_session ON usage_log(session_id);
 CREATE INDEX IF NOT EXISTS idx_usage_created ON usage_log(created_at);
 `;
+
+/**
+ * Columns added after the first deployment. `CREATE TABLE IF NOT EXISTS` will
+ * not alter a table that already exists, so an existing database would keep the
+ * old `sessions` shape and every insert naming a new column would fail.
+ */
+const SESSION_COLUMNS: Array<[string, string]> = [
+  // The seed after redirects. An expansion resumes from this instead of paying
+  // to follow the same redirect chain again.
+  ['root_url', 'TEXT'],
+  // Page budget this session has been crawled up to, cumulative across passes.
+  ['page_budget', 'INTEGER NOT NULL DEFAULT 1'],
+  // 1 once sitemap discovery has run, so it is paid for at most once.
+  ['discovered', 'INTEGER NOT NULL DEFAULT 0'],
+];
+
+function migrate(db: Database.Database): void {
+  const existing = new Set(
+    (db.pragma('table_info(sessions)') as Array<{ name: string }>).map((c) => c.name),
+  );
+  for (const [name, decl] of SESSION_COLUMNS) {
+    if (!existing.has(name)) db.exec(`ALTER TABLE sessions ADD COLUMN ${name} ${decl}`);
+  }
+}
 
 export type DB = Database.Database;
 
@@ -82,6 +117,7 @@ export function openDb(path: string = config.databasePath): DB {
   db.pragma('foreign_keys = ON');
   db.pragma('busy_timeout = 5000');
   db.exec(SCHEMA);
+  migrate(db);
   return db;
 }
 

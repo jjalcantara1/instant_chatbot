@@ -6,6 +6,8 @@ export interface ProgressEvent {
 }
 export interface ReadyEvent {
   pages: number; chunks: number; elapsedMs: number; skipped: number;
+  /** Pages found but not read - how much a "read more" has to work with. */
+  frontier: number;
 }
 export interface ErrorEvent { code: string; message: string; }
 
@@ -22,6 +24,15 @@ export interface SessionDetail {
   messagesUsed: number;
   messagesAllowed: number;
   pages: PageEvent[];
+  /** Discovered but unread pages waiting in this session's frontier. */
+  frontier: number;
+  /** How many more pages this session is still allowed to take. */
+  headroom: number;
+  /** Pages this session has been crawled up to, across every pass. */
+  pageBudget: number;
+  maxPages: number;
+  /** Default size of one "read more". */
+  expandStep: number;
 }
 
 export interface Source {
@@ -46,15 +57,35 @@ async function parseError(res: Response): Promise<never> {
   throw new ApiError(code, message);
 }
 
-export async function createSession(url: string): Promise<string> {
+/**
+ * Start an index. `pages` is how much of the site to read; omitted, the server
+ * reads the landing page and nothing else.
+ */
+export async function createSession(url: string, pages?: number): Promise<string> {
   const res = await fetch('/api/sessions', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ url }),
+    body: JSON.stringify(pages === undefined ? { url } : { url, pages }),
   });
   if (!res.ok) await parseError(res);
   const body = await res.json() as { sessionId: string };
   return body.sessionId;
+}
+
+/**
+ * Read more of a site that is already indexed. Resolves as soon as the run has
+ * been accepted; progress arrives over the same event stream as the first pass,
+ * so `subscribeToIndex` covers both.
+ */
+export async function expandSession(sessionId: string, pages: number): Promise<number> {
+  const res = await fetch(`/api/sessions/${sessionId}/expand`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ pages }),
+  });
+  if (!res.ok) await parseError(res);
+  const body = await res.json() as { pages: number };
+  return body.pages;
 }
 
 export async function getSession(sessionId: string): Promise<SessionDetail> {

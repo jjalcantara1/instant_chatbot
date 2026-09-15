@@ -56,7 +56,7 @@ label 12px mono, sentence case.
 │                                                        │
 │   or try  kleiosoftware.com  11ty.dev  danluu.com      │
 │                                                        │
-│   25 pages max · expires in 24 hours · no account      │
+│   up to 25 pages · expires in 24 hours · no account      │
 └────────────────────────────────────────────────────────┘
 ```
 

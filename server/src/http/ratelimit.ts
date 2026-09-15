@@ -36,7 +36,9 @@ const HOUR_MS = 60 * 60 * 1000;
  * slot, two typos would lock a visitor out for an hour having indexed nothing.
  * Callers peek first, do the work, then consume only on success.
  */
-export function peekRateLimit(ip: string, action: 'index' | 'message', limit: number): LimitResult {
+export type LimitedAction = 'index' | 'expand' | 'message';
+
+export function peekRateLimit(ip: string, action: LimitedAction, limit: number): LimitResult {
   const db = getDb();
   const now = Date.now();
   const windowStart = Math.floor(now / HOUR_MS) * HOUR_MS;
@@ -55,7 +57,7 @@ export function peekRateLimit(ip: string, action: 'index' | 'message', limit: nu
 }
 
 /** Spend one unit of the allowance. Call only once the work has been accepted. */
-export function consumeRateLimit(ip: string, action: 'index' | 'message'): void {
+export function consumeRateLimit(ip: string, action: LimitedAction): void {
   const windowStart = Math.floor(Date.now() / HOUR_MS) * HOUR_MS;
   getDb().prepare(
     `INSERT INTO rate_limits (ip_hash, action, window_start, count) VALUES (?, ?, ?, 1)

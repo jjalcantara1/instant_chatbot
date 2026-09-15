@@ -18,14 +18,26 @@ export interface CrawledPage {
   error?: string;
 }
 
+/** A URL that was discovered and allowed, but not read within this pass's budget. */
+export interface FrontierEntry {
+  url: string;
+  score: number;
+}
+
 export interface CrawlSummary {
   pages: CrawledPage[];
   domain: string;
+  /** The seed after redirects, which is what a later pass should resume from. */
+  rootUrl: string;
   elapsedMs: number;
   hitPageCap: boolean;
   hitDeadline: boolean;
   robotsLoaded: boolean;
   sitemapCount: number;
+  /** True when sitemap discovery actually ran in this pass. */
+  sitemapUsed: boolean;
+  /** What was left in the queue when the budget ran out, best first. */
+  frontier: FrontierEntry[];
 }
 
 export interface CrawlHandlers {
@@ -40,6 +52,29 @@ export interface CrawlOptions {
   timeoutMs?: number;
   concurrency?: number;
   signal?: AbortSignal;
+  /**
+   * URLs to queue alongside the seed — a frontier carried over from an earlier
+   * pass. They are scored and filtered exactly like freshly discovered links.
+   */
+  seeds?: string[];
+  /**
+   * URLs an earlier pass already read. Marked as seen before anything is
+   * queued, so an expansion spends its whole budget on pages that are new.
+   */
+  visited?: Iterable<string>;
+  /**
+   * Fetch /sitemap.xml and the sitemaps robots.txt names. Sitemap discovery is
+   * the single largest fixed cost in a crawl — up to six requests before the
+   * first page is read — and a landing-page pass would throw every URL it
+   * returned straight into the frontier unread, so it defaults to off unless
+   * there is a budget to spend on the results.
+   */
+  useSitemap?: boolean;
+  /**
+   * Follow the seed's redirects before crawling. An expansion already knows
+   * the canonical root from its first pass and should not pay for it twice.
+   */
+  resolveSeed?: boolean;
 }
 
 export async function crawl(
@@ -47,9 +82,14 @@ export async function crawl(
   handlers: CrawlHandlers = {},
   options: CrawlOptions = {},
 ): Promise<CrawlSummary> {
-  const maxPages = options.maxPages ?? config.maxPages;
+  const maxPages = options.maxPages ?? config.defaultPages;
   const timeoutMs = options.timeoutMs ?? config.crawlTimeoutMs;
-  const concurrency = options.concurrency ?? config.crawlConcurrency;
+  const concurrency = options.concurrency ?? Math.min(config.crawlConcurrency, maxPages);
+  // Nothing beyond the seed will be read on a one-page pass, so the sitemap's
+  // URLs would cost six round trips to produce a frontier that link extraction
+  // gives us for free.
+  const useSitemap = options.useSitemap ?? maxPages > 1;
+  const resolveSeed = options.resolveSeed ?? true;
 
   const started = Date.now();
   const deadlineAt = started + timeoutMs;
@@ -61,13 +101,15 @@ export async function crawl(
   // (old-domain.com, or a *.web.app that redirects to the custom domain) should
   // follow to the canonical site rather than being refused as off-domain. Only
   // the seed gets this treatment; every later redirect off-site is still cut.
-  handlers.onStage?.('resolving');
   const prefetched = new Map<string, Extract<FetchResult, { ok: true }>>();
   let resolvedRoot = normalisedRoot;
-  const seedRes = await safeFetch(normalisedRoot, { timeoutMs: config.perRequestTimeoutMs });
-  if (seedRes.ok) {
-    resolvedRoot = normaliseUrl(seedRes.finalUrl) ?? normalisedRoot;
-    prefetched.set(resolvedRoot, seedRes);
+  if (resolveSeed) {
+    handlers.onStage?.('resolving');
+    const seedRes = await safeFetch(normalisedRoot, { timeoutMs: config.perRequestTimeoutMs });
+    if (seedRes.ok) {
+      resolvedRoot = normaliseUrl(seedRes.finalUrl) ?? normalisedRoot;
+      prefetched.set(resolvedRoot, seedRes);
+    }
   }
 
   // Bound explicitly: `worker` below is a hoisted declaration, so TypeScript
@@ -78,15 +120,24 @@ export async function crawl(
   handlers.onStage?.('robots');
   const robots = await fetchRobots(root);
 
-  handlers.onStage?.('sitemap');
   let sitemapUrls: string[] = [];
-  try {
-    sitemapUrls = await collectSitemapUrls(root, robots.sitemaps);
-  } catch { /* a broken sitemap is not fatal */ }
+  if (useSitemap) {
+    handlers.onStage?.('sitemap');
+    try {
+      sitemapUrls = await collectSitemapUrls(root, robots.sitemaps);
+    } catch { /* a broken sitemap is not fatal */ }
+  }
 
   const queue = new PriorityQueue<string>();
   const seen = new Set<string>();
   const pages: CrawledPage[] = [];
+
+  // Pages an earlier pass already read. Seeding `seen` with them means they are
+  // never queued, never fetched, and never stored twice.
+  for (const done of options.visited ?? []) {
+    const norm = normaliseUrl(done);
+    if (norm) seen.add(norm);
+  }
 
   const enqueue = (url: string): void => {
     const norm = normaliseUrl(url);
@@ -100,6 +151,7 @@ export async function crawl(
   };
 
   enqueue(root);
+  for (const u of options.seeds ?? []) enqueue(u);
   for (const u of sitemapUrls) enqueue(u);
 
   handlers.onStage?.('crawling');
@@ -198,13 +250,23 @@ export async function crawl(
   if (pages.length >= maxPages) hitPageCap = true;
   if (Date.now() >= deadlineAt) hitDeadline = true;
 
+  // Whatever is still queued was discovered, allowed by robots, in scope, and
+  // simply not reached. Handing it back is what makes "read a few more pages"
+  // cost only the pages themselves.
+  const frontier: FrontierEntry[] = queue
+    .drain()
+    .map((e) => ({ url: e.value, score: e.score }));
+
   return {
     pages,
     domain,
+    rootUrl: root,
     elapsedMs: Date.now() - started,
     hitPageCap,
     hitDeadline,
     robotsLoaded: robots.loaded,
     sitemapCount: sitemapUrls.length,
+    sitemapUsed: useSitemap,
+    frontier,
   };
 }

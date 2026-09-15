@@ -14,14 +14,31 @@ type View =
 
 const EXAMPLES = ['kleiosoftware.com', '11ty.dev', 'danluu.com'];
 
+/**
+ * How much of the site to read, in pages.
+ *
+ * The landing page alone is the default because it is the fast one: a single
+ * fetch and a single embedding batch, which is the difference between an answer
+ * in seconds and a visitor who leaves. Everything past it is opt-in — here, or
+ * afterwards from the chat screen, which costs only the new pages.
+ */
+const SCOPES: Array<{ pages: number; label: string }> = [
+  { pages: 1, label: 'landing page' },
+  { pages: 5, label: '5 pages' },
+  { pages: 15, label: '15 pages' },
+  { pages: 25, label: '25 pages' },
+];
+
+const DEFAULT_SCOPE = 1;
+
 /** The input and error screens share this; the crawl and chat screens do not. */
 function TopBar(): React.ReactElement {
   return (
     <div className="flex justify-between items-baseline px-[18px] py-4 md:px-12 md:py-[22px] border-b rule">
       <span className="text-[13px] md:text-[14px] font-semibold tracking-[-0.01em]">Site Chat</span>
       <span className="text-[11px] md:text-[12px] text-[var(--muted)]">
-        <span className="md:hidden">25 pages max</span>
-        <span className="hidden md:inline">25 pages max · expires in 24 hours · no account</span>
+        <span className="md:hidden">up to 25 pages</span>
+        <span className="hidden md:inline">up to 25 pages · expires in 24 hours · no account</span>
       </span>
     </div>
   );
@@ -30,6 +47,7 @@ function TopBar(): React.ReactElement {
 export function App(): React.ReactElement {
   const [view, setView] = useState<View>({ kind: 'input' });
   const [url, setUrl] = useState('');
+  const [scope, setScope] = useState(DEFAULT_SCOPE);
   const [submitting, setSubmitting] = useState(false);
   const [inputError, setInputError] = useState<string | null>(null);
 
@@ -39,6 +57,9 @@ export function App(): React.ReactElement {
   const [queued, setQueued] = useState(0);
   const [stage, setStage] = useState('resolving');
   const [domain, setDomain] = useState('');
+  // The page budget this run was started with, so the log can say what it is
+  // working towards instead of counting up against nothing.
+  const [target, setTarget] = useState(DEFAULT_SCOPE);
   // Drives the 240ms slide-out so the log appears to dock into the sidebar.
   const [leaving, setLeaving] = useState(false);
   // When the indexer last actually did something. Embedding batches can be
@@ -50,7 +71,7 @@ export function App(): React.ReactElement {
 
   useEffect(() => () => teardown.current?.(), []);
 
-  const start = useCallback(async (raw: string): Promise<void> => {
+  const start = useCallback(async (raw: string, pages: number): Promise<void> => {
     const target = raw.trim();
     if (!target || submitting) return;
 
@@ -58,12 +79,13 @@ export function App(): React.ReactElement {
     setInputError(null);
 
     try {
-      const sessionId = await createSession(target);
+      const sessionId = await createSession(target, pages);
 
       setPages([]); setChunks(0); setEmbedded(0); setQueued(0); setStage('resolving');
       setLeaving(false);
       setLastEventAt(Date.now());
       setDomain(target.replace(/^https?:\/\//, '').replace(/\/.*$/, ''));
+      setTarget(pages);
       startedAt.current = Date.now();
       setView({ kind: 'indexing' });
       history.replaceState(null, '', `?s=${sessionId}`);
@@ -123,7 +145,9 @@ export function App(): React.ReactElement {
     void (async () => {
       try {
         const session = await getSession(id);
-        if (session.status === 'ready') {
+        // 'expanding' is a working index that is being added to, so a reload
+        // mid-expansion should land back in the chat, not on the input screen.
+        if (session.status === 'ready' || session.status === 'expanding') {
           setPages(session.pages);
           setView({ kind: 'chat', session });
         }
@@ -144,7 +168,13 @@ export function App(): React.ReactElement {
       // Desktop is a fixed shell so only the transcript scrolls. On a phone the
       // panes stack, so the page scrolls normally instead.
       <div className="min-h-full md:h-full flex flex-col md:overflow-hidden screen-entering">
-        <Chat session={view.session} onReset={reset} />
+        <Chat
+          session={view.session}
+          onReset={reset}
+          // An expansion changes the page list, the counts and the frontier, so
+          // the refreshed session replaces the one this screen was opened with.
+          onSession={(next) => setView({ kind: 'chat', session: next })}
+        />
       </div>
     );
   }
@@ -154,6 +184,7 @@ export function App(): React.ReactElement {
       <main className={`min-h-full md:h-full flex flex-col md:overflow-hidden ${leaving ? 'crawl-leaving' : ''}`}>
         <CrawlLog
           domain={domain}
+          target={target}
           pages={pages}
           chunks={chunks}
           embedded={embedded}
@@ -216,7 +247,7 @@ export function App(): React.ReactElement {
 
         <form
           className="mt-[34px] md:mt-[54px] md:flex md:items-end md:gap-7 md:max-w-[860px]"
-          onSubmit={(e) => { e.preventDefault(); void start(url); }}
+          onSubmit={(e) => { e.preventDefault(); void start(url, scope); }}
         >
           <div className="md:flex-1">
             <input
@@ -241,6 +272,27 @@ export function App(): React.ReactElement {
           </button>
         </form>
 
+        <div className="mt-[22px] md:mt-6 flex flex-wrap items-baseline gap-x-[14px] md:gap-x-5 gap-y-[14px] text-[12.5px] md:text-[13px] text-[var(--muted)]">
+          <span>read</span>
+          {SCOPES.map((s) => (
+            <button
+              key={s.pages}
+              type="button"
+              aria-pressed={scope === s.pages}
+              disabled={submitting}
+              onClick={() => setScope(s.pages)}
+              className="choice text-[13px]"
+            >
+              {s.label}
+            </button>
+          ))}
+          <span className="basis-full text-[12px] md:basis-auto md:ml-1">
+            {scope === 1
+              ? 'fastest — you can read more once it is open'
+              : 'slower to start; the landing page alone takes seconds'}
+          </span>
+        </div>
+
         {inputError && (
           <p className="mt-3 text-[13px] text-[var(--flag)] max-w-[640px]">{inputError}</p>
         )}
@@ -251,7 +303,7 @@ export function App(): React.ReactElement {
             <button
               key={e}
               type="button"
-              onClick={() => { setUrl(e); void start(e); }}
+              onClick={() => { setUrl(e); void start(e, scope); }}
               className="link-path font-mono text-[13px] py-1 md:py-0"
             >
               {e}

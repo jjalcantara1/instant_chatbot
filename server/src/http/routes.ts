@@ -3,7 +3,9 @@ import { config, resolveChat } from '../config.js';
 import { resolveEmbedding } from '../indexing/embed.js';
 import { getDb } from '../db.js';
 import { openSse } from './sse.js';
-import { createSession, getJob, ValidationError, toUserFacing, queueDepth, runningCount } from './jobs.js';
+import {
+  createSession, expandSession, getJob, ValidationError, toUserFacing, queueDepth, runningCount,
+} from './jobs.js';
 import { peekRateLimit, consumeRateLimit, checkDailyCap, clientIp } from './ratelimit.js';
 import { streamAnswer } from '../chat/chat.js';
 import type { IndexEvent } from '../indexing/pipeline.js';
@@ -14,6 +16,21 @@ interface SessionRow {
   id: string; origin_url: string; domain: string; status: string;
   page_count: number; chunk_count: number; error: string | null;
   created_at: number; expires_at: number;
+  page_budget: number; discovered: number;
+}
+
+/** Pages discovered but not yet read - the size of the "read more" offer. */
+function frontierSize(id: string): number {
+  return (getDb().prepare('SELECT COUNT(*) AS n FROM frontier WHERE session_id = ?')
+    .get(id) as { n: number }).n;
+}
+
+/**
+ * How many more pages this session could take. A session is allowed to grow to
+ * MAX_PAGES in total no matter how many passes it takes to get there.
+ */
+function headroom(session: SessionRow): number {
+  return Math.max(0, config.maxPages - session.page_count);
 }
 
 function loadSession(id: string): SessionRow | undefined {
@@ -53,14 +70,16 @@ router.post('/api/sessions', async (req: Request, res: Response) => {
     return;
   }
 
-  const body = req.body as { url?: unknown } | undefined;
+  const body = req.body as { url?: unknown; pages?: unknown } | undefined;
   const url = typeof body?.url === 'string' ? body.url : '';
 
   try {
-    const { sessionId } = await createSession(url);
+    // `pages` is optional and clamped server-side; absent means the landing
+    // page only, which is what the overwhelming majority of runs should be.
+    const { sessionId, pages } = await createSession(url, body?.pages);
     // Only a real indexing run costs anything, so only that spends a slot.
     consumeRateLimit(ip, 'index');
-    res.status(201).json({ sessionId });
+    res.status(201).json({ sessionId, pages });
   } catch (err) {
     if (err instanceof ValidationError) {
       res.status(400).json({ code: err.code, message: err.message });
@@ -96,6 +115,12 @@ router.get('/api/sessions/:id', (req: Request, res: Response) => {
   res.json({
     sessionId: session.id,
     url: session.origin_url,
+    // What a "read more" would have to work with, and how far it may go.
+    frontier: frontierSize(id),
+    headroom: headroom(session),
+    pageBudget: session.page_budget,
+    maxPages: config.maxPages,
+    expandStep: config.expandStep,
     // Where widget.js is actually served from. The frontend is deployed to
     // Firebase Hosting while the API lives on the VPS, so the page's own
     // origin is the wrong base for the embed snippet.
@@ -140,7 +165,10 @@ router.get('/api/sessions/:id/events', (req: Request, res: Response) => {
     } else if (e.type === 'stage') {
       channel.send('progress', { ...lastCounts, stage: e.stage });
     } else if (e.type === 'ready') {
-      channel.send('ready', { pages: e.pages, chunks: e.chunks, elapsedMs: e.elapsedMs, skipped: e.skipped });
+      channel.send('ready', {
+        pages: e.pages, chunks: e.chunks, elapsedMs: e.elapsedMs,
+        skipped: e.skipped, frontier: e.frontier,
+      });
       channel.close();
     } else if (e.type === 'error') {
       channel.send('error', { code: e.code, message: e.message });
@@ -161,7 +189,7 @@ router.get('/api/sessions/:id/events', (req: Request, res: Response) => {
       for (const p of pages) channel.send('page', p);
       channel.send('ready', {
         pages: session.page_count, chunks: session.chunk_count,
-        elapsedMs: 0, skipped: 0,
+        elapsedMs: 0, skipped: 0, frontier: frontierSize(id),
       });
     } else {
       channel.send('error', {
@@ -175,6 +203,57 @@ router.get('/api/sessions/:id/events', (req: Request, res: Response) => {
 
   const unsubscribe = job.subscribe(forward);
   res.on('close', unsubscribe);
+});
+
+/**
+ * Read more of a site that is already indexed. Separately rate limited from
+ * indexing: with a one-page default this is the normal way to get a bigger
+ * index, so charging it against the three-per-hour index budget would make the
+ * default setting feel like a trap.
+ */
+router.post('/api/sessions/:id/expand', async (req: Request, res: Response) => {
+  const id = req.params['id'] as string;
+  const session = loadSession(id);
+
+  // Missing and expired are not 409s. Checked here rather than inside
+  // expandSession so they carry the same codes and statuses as every other
+  // session-scoped route.
+  if (!session) {
+    res.status(404).json({ code: 'NOT_FOUND', message: 'That session does not exist. It may have expired — sessions last 24 hours.' });
+    return;
+  }
+  if (session.expires_at < Date.now()) {
+    res.status(410).json({ code: 'EXPIRED', message: 'This session has expired. Demo sessions last 24 hours.' });
+    return;
+  }
+
+  const ip = clientIp(req);
+
+  const limit = peekRateLimit(ip, 'expand', config.expandsPerIpPerHour);
+  if (!limit.allowed) {
+    const mins = Math.ceil(limit.retryAfterSeconds / 60);
+    res.setHeader('Retry-After', String(limit.retryAfterSeconds));
+    res.status(429).json({
+      code: 'RATE_LIMITED',
+      message: `You have read ${limit.limit} extra batches of pages this hour, which is the cap. You can read more in ${mins} minute${mins === 1 ? '' : 's'}.`,
+    });
+    return;
+  }
+
+  const body = req.body as { pages?: unknown } | undefined;
+
+  try {
+    const result = await expandSession(id, body?.pages);
+    consumeRateLimit(ip, 'expand');
+    res.status(202).json(result);
+  } catch (err) {
+    if (err instanceof ValidationError) {
+      res.status(409).json({ code: err.code, message: err.message });
+      return;
+    }
+    const { code, message } = toUserFacing(err);
+    res.status(500).json({ code, message });
+  }
 });
 
 /**
@@ -238,7 +317,10 @@ router.post('/api/sessions/:id/messages', async (req: Request, res: Response) =>
     res.status(410).json({ code: 'EXPIRED', message: 'This session has expired. Demo sessions last 24 hours.' });
     return;
   }
-  if (session.status !== 'ready') {
+  // 'expanding' means more pages are being added to an index that already
+  // works. Refusing questions during that would make "read more" feel like a
+  // downgrade, so only a first pass blocks the chat.
+  if (session.status !== 'ready' && session.status !== 'expanding') {
     res.status(409).json({ code: 'NOT_READY', message: 'This site is still being indexed.' });
     return;
   }
@@ -399,7 +481,9 @@ router.get('/admin/stats', (req: Request, res: Response) => {
     config: {
       chatModel: `${resolveChat().provider}/${resolveChat().model}`,
       embeddingModel: resolveEmbedding().model,
+      defaultPages: config.defaultPages,
       maxPages: config.maxPages,
+      expandStep: config.expandStep,
       concurrentCrawls: config.concurrentCrawls,
     },
   });

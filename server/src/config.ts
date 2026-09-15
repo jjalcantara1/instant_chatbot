@@ -107,11 +107,26 @@ export const config = {
   ipHashSalt: str('IP_HASH_SALT', 'dev-salt-do-not-use-in-prod'),
   adminToken: str('ADMIN_TOKEN'),
 
+  /**
+   * What a visitor gets without asking for more. One page is the landing page
+   * and nothing else: a single fetch, no sitemap round trips, one embedding
+   * batch. That is the difference between a demo that answers in seconds and
+   * one the visitor abandons — everything past the landing page is opt-in,
+   * either up front or by expanding the session afterwards.
+   */
+  defaultPages: num('DEFAULT_PAGES', 1),
+  /** Ceiling on what a visitor may ask for, in one pass or cumulatively. */
   maxPages: num('MAX_PAGES', 25),
+  /** Page counts offered in the UI. Anything in 1..maxPages is accepted. */
+  pageChoices: [1, 5, 15, 25],
+  /** How many more pages one "read more" costs, when not given explicitly. */
+  expandStep: num('EXPAND_STEP', 5),
+
   crawlTimeoutMs: num('CRAWL_TIMEOUT_MS', 45_000),
   dailyIndexCap: num('DAILY_INDEX_CAP', 200),
   concurrentCrawls: num('CONCURRENT_CRAWLS', 3),
   indexPerIpPerHour: num('INDEX_PER_IP_PER_HOUR', 3),
+  expandsPerIpPerHour: num('EXPANDS_PER_IP_PER_HOUR', 10),
   messagesPerIpPerHour: num('MESSAGES_PER_IP_PER_HOUR', 60),
   maxMessagesPerSession: num('MAX_MESSAGES_PER_SESSION', 20),
 
@@ -143,3 +158,25 @@ export const config = {
 } as const;
 
 export type Config = typeof config;
+
+/**
+ * Clamp a requested page count to something we are willing to crawl. Anything
+ * unparseable falls back to the default rather than to the ceiling: a bad
+ * request should cost a visitor one page, not twenty-five.
+ */
+export function clampPages(requested: unknown, fallback: number = config.defaultPages): number {
+  const n = Math.floor(Number(requested));
+  if (!Number.isFinite(n) || n < 1) return fallback;
+  return Math.min(n, config.maxPages);
+}
+
+/**
+ * CRAWL_TIMEOUT_MS is the budget for a *full* 25-page crawl. Spending it on a
+ * one-page pass means a site that hangs holds the visitor for 45 seconds to
+ * fetch one document, so the deadline scales with what was actually asked for
+ * and never exceeds the configured ceiling.
+ */
+export function crawlBudgetMs(pages: number): number {
+  const scaled = 9_000 + 1_500 * Math.max(0, pages - 1);
+  return Math.min(config.crawlTimeoutMs, Math.round(scaled));
+}

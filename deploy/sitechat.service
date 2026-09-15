@@ -26,13 +26,29 @@ ProtectKernelModules=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes
 RestrictNamespaces=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 LockPersonality=yes
-MemoryDenyWriteExecute=yes
+# NOTE: no MemoryDenyWriteExecute= here either. V8 is a JIT -- it maps pages
+# writable and then executable to emit machine code, which is exactly what
+# that setting forbids. With it on, node dies at startup with SIGTRAP and
+# systemd reports `code=killed, signal=TRAP` with no other explanation.
 # The SQLite file and its WAL are the only things it may write.
 ReadWritePaths=/srv/sitechat/data
-# It must reach the public internet, but never the host's own loopback.
-IPAddressDeny=localhost link-local multicast
-IPAddressAllow=any
+
+# NOTE: there is deliberately no IPAddressDeny= here.
+#
+# systemd's IP filter is not direction-aware, so `IPAddressDeny=localhost`
+# blocks Caddy's reverse_proxy into :8080 just as surely as it blocks the
+# crawler dialling out to loopback -- the service comes up and then 502s.
+# `IPAddressDeny=link-local` is worse on GCE specifically: the resolver is
+# either the metadata server on 169.254.169.254 or a systemd-resolved stub on
+# 127.0.0.53, so one of those two rules kills DNS and no crawl resolves at all.
+#
+# The real control is server/src/crawl/ssrf.ts, which is direction-aware in the
+# way systemd cannot be: it blocks 127.0.0.0/8, ::1 and 169.254.0.0/16 for
+# crawl targets only, re-runs on every redirect hop, and pins the connection to
+# the exact addresses it vetted so DNS cannot be rebound underneath it. 51 tests
+# cover it. Do not "harden" this by adding the rules back.
 
 StandardOutput=journal
 StandardError=journal

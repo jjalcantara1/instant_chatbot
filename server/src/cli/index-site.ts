@@ -59,6 +59,7 @@ try {
   });
   console.log(`\ndomain       ${result.domain}`);
   console.log(`embed tokens ${result.embedTokens.toLocaleString()}`);
+  console.log(`frontier     ${result.frontier} discovered, unread`);
   console.log(`session id   ${sessionId}`);
   console.log(`\ninspect with:  npm run dump -- ${sessionId} --db ${dbPath}`);
 } catch (e) {

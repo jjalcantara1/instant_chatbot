@@ -12,3 +12,4 @@ server/dist/
 scratch/
 .DS_Store
 *.tsbuildinfo
+sitechat-deploy.tar.gz
