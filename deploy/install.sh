@@ -29,7 +29,12 @@ fi
 echo "==> Dependencies (native build happens here, not on the workstation)"
 sudo mkdir -p "${REMOTE}/server"
 sudo cp server/package.json "${REMOTE}/server/package.json"
-( cd "${REMOTE}/server" && sudo npm install --omit=dev --no-audit --no-fund --loglevel=error )
+# ONNXRUNTIME_NODE_INSTALL=skip: on linux/x64, onnxruntime-node's postinstall
+# otherwise downloads the CUDA/TensorRT runtime from NuGet -- hundreds of MB,
+# useless on a CPU-only VM, and one more thing that can fail a deploy. The CPU
+# runtime the local embedder uses ships inside the package. Passed through
+# `env` because sudo's default policy may refuse a bare VAR=value.
+( cd "${REMOTE}/server" && sudo env ONNXRUNTIME_NODE_INSTALL=skip npm install --omit=dev --no-audit --no-fund --loglevel=error )
 
 echo "==> Application files"
 sudo rm -rf "${REMOTE}/server/dist" "${REMOTE}/server/config"

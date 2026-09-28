@@ -223,6 +223,111 @@ export class HashEmbedder implements Embedder {
   }
 }
 
+/** How one open model wants to be called. */
+interface LocalModelSpec {
+  dims: number;
+  pooling: 'cls' | 'mean';
+  /** Prepended to questions. bge was trained with this instruction for retrieval. */
+  queryPrefix: string;
+  documentPrefix: string;
+}
+
+/**
+ * Open models this server knows how to call. Each needs its own similarity
+ * floor measured with `npm run eval` before it is added here.
+ *
+ * bge-small-en-v1.5 was chosen by measurement, not reputation: against the
+ * eval's questions on the chunks voyage-3-lite indexed, it put the answering
+ * chunk among the six the model sees for 42 of 42 questions (voyage-3-lite
+ * also 42/42) with a better mean reciprocal rank (0.887 vs 0.839), ahead of
+ * gte-small, snowflake-arctic-embed-s/-xs, all-MiniLM-L6-v2 and
+ * multilingual-e5-small. It is English-only; a site in another language will
+ * retrieve noticeably worse than it did on Voyage.
+ */
+export const LOCAL_MODELS: Record<string, LocalModelSpec> = {
+  'Xenova/bge-small-en-v1.5': {
+    dims: 384,
+    pooling: 'cls',
+    queryPrefix: 'Represent this sentence for searching relevant passages: ',
+    documentPrefix: '',
+  },
+};
+
+export const DEFAULT_LOCAL_MODEL = 'Xenova/bge-small-en-v1.5';
+
+/** Texts per inference call. Bigger batches grow the runtime's memory arena. */
+const LOCAL_BATCH = 8;
+
+interface FeatureExtractor {
+  (texts: string[], options: { pooling: 'cls' | 'mean'; normalize: boolean }): Promise<{ data: ArrayLike<number>; dims: number[] }>;
+}
+
+/**
+ * An open embedding model run inside this process with transformers.js: no
+ * key, no quota, no network round trip per question. That round trip was the
+ * whole problem on an unbilled Voyage key, where every question's embedding
+ * waited for a pacing slot shared by every visitor.
+ *
+ * It costs memory and CPU on the box instead. One thread, so the event loop
+ * keeps the other vCPU of a small VM; batches of eight, which on a 17-page site
+ * held the runtime's memory arena to about +100 MB over the ~80 MB model. The
+ * model downloads once (34 MB) into EMBEDDING_CACHE_DIR, which has to be
+ * writable - node_modules is not, under the systemd unit.
+ *
+ * transformers.js loads the ONNX runtime's native binding on import, so it is
+ * only imported when this embedder is actually used.
+ */
+export class LocalEmbedder implements Embedder {
+  readonly name: string;
+  readonly dims: number;
+  private extractor: Promise<FeatureExtractor> | null = null;
+  /** Inference runs one call at a time: concurrent calls only contend for one thread. */
+  private queue: Promise<unknown> = Promise.resolve();
+
+  constructor(model: string, private readonly spec: LocalModelSpec, private readonly cacheDir: string) {
+    this.name = model;
+    this.dims = spec.dims;
+  }
+
+  private load(): Promise<FeatureExtractor> {
+    if (!this.extractor) {
+      this.extractor = (async () => {
+        const { pipeline, env } = await import('@huggingface/transformers');
+        env.cacheDir = this.cacheDir;
+        const extractor = await pipeline('feature-extraction', this.name, {
+          dtype: 'q8',
+          session_options: { intraOpNumThreads: 1, interOpNumThreads: 1 },
+        });
+        return extractor as unknown as FeatureExtractor;
+      })();
+      // A failed download must not poison every later attempt.
+      this.extractor.catch(() => { this.extractor = null; });
+    }
+    return this.extractor;
+  }
+
+  async embed(texts: string[], kind: EmbedKind = 'document'): Promise<EmbedResult> {
+    if (texts.length === 0) return { vectors: [], tokens: 0 };
+    const prefix = kind === 'query' ? this.spec.queryPrefix : this.spec.documentPrefix;
+
+    const run = this.queue.then(async () => {
+      const extractor = await this.load();
+      const vectors: Float32Array[] = [];
+      for (let i = 0; i < texts.length; i += LOCAL_BATCH) {
+        const batch = texts.slice(i, i + LOCAL_BATCH).map((t) => prefix + t);
+        const out = await extractor(batch, { pooling: this.spec.pooling, normalize: true });
+        const width = out.dims[out.dims.length - 1] as number;
+        const data = Float32Array.from(out.data);
+        for (let j = 0; j < batch.length; j++) vectors.push(data.slice(j * width, (j + 1) * width));
+      }
+      return vectors;
+    });
+    this.queue = run.catch(() => {});
+
+    return { vectors: await run, tokens: texts.reduce((s, t) => s + Math.round(t.length / 4), 0) };
+  }
+}
+
 /**
  * What getEmbedder() would actually use, without needing a key to be present.
  * The boot banner and /admin/stats both report the embedder, and reading
@@ -231,6 +336,9 @@ export class HashEmbedder implements Embedder {
 export function resolveEmbedding(): { provider: string; model: string } {
   const provider = process.env['EMBEDDING_PROVIDER'] ?? config.embeddingProvider;
   if (provider === 'hash') return { provider, model: 'hash-dev' };
+  if (provider === 'local') {
+    return { provider, model: config.embeddingModel in LOCAL_MODELS ? config.embeddingModel : DEFAULT_LOCAL_MODEL };
+  }
   if (provider === 'gemini') {
     return {
       provider,
@@ -246,23 +354,36 @@ export function resolveEmbedding(): { provider: string; model: string } {
   return { provider, model: config.embeddingModel };
 }
 
+let cached: { key: string; embedder: Embedder } | null = null;
+
+/**
+ * One embedder per provider and model for the life of the process, the way
+ * getChatModel() works. Retrieval keeps a cache of query vectors per embedder,
+ * and a fresh instance per question would make every lookup a miss.
+ */
 export function getEmbedder(): Embedder {
-  const provider = process.env['EMBEDDING_PROVIDER'] ?? config.embeddingProvider;
+  const { provider, model } = resolveEmbedding();
+  const key = `${provider}/${model}`;
+  if (cached?.key === key) return cached.embedder;
 
-  if (provider === 'hash') return new HashEmbedder();
-
-  if (provider === 'voyage') {
+  let embedder: Embedder;
+  if (provider === 'hash') {
+    embedder = new HashEmbedder();
+  } else if (provider === 'local') {
+    embedder = new LocalEmbedder(model, LOCAL_MODELS[model] as LocalModelSpec, config.embeddingCacheDir);
+  } else if (provider === 'voyage') {
     if (!config.voyageApiKey) throw new Error('VOYAGE_API_KEY is not set.');
-    return new VoyageEmbedder(config.voyageApiKey, resolveEmbedding().model);
-  }
-
-  if (provider === 'gemini') {
+    embedder = new VoyageEmbedder(config.voyageApiKey, model);
+  } else if (provider === 'gemini') {
     if (!config.geminiApiKey) throw new Error('GEMINI_API_KEY is not set.');
-    return new GeminiEmbedder(config.geminiApiKey, resolveEmbedding().model);
+    embedder = new GeminiEmbedder(config.geminiApiKey, model);
+  } else {
+    if (!config.openaiApiKey) throw new Error('OPENAI_API_KEY is not set.');
+    embedder = new OpenAIEmbedder(config.openaiApiKey, model);
   }
 
-  if (!config.openaiApiKey) throw new Error('OPENAI_API_KEY is not set.');
-  return new OpenAIEmbedder(config.openaiApiKey, config.embeddingModel);
+  cached = { key, embedder };
+  return embedder;
 }
 
 /**

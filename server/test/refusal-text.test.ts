@@ -1,33 +1,63 @@
-import { describe, it, expect } from 'vitest';
-import { cleanTitle } from '../src/chat/chat.js';
+import { describe, it, expect, beforeEach } from 'vitest';
+import { openDb, type DB } from '../src/db.js';
+import { refusalSuggestions, refusalText } from '../src/chat/chat.js';
 
 /**
- * Titles are SEO copy. A refusal that reads them back verbatim sounds like a
- * machine reciting metadata, which is exactly the moment the visitor is judging
- * whether this thing understands their site.
+ * A refusal is the moment the visitor is judging whether this thing
+ * understands their site, so what it suggests instead has to be something the
+ * app will actually answer. It used to read page titles back ("You could ask
+ * about FAQ, Web Developer in Pampanga or AI Programmer in Pampanga") - SEO
+ * copy, two of which the app itself refused. It now offers the session's
+ * suggested questions, each already verified to be answerable.
  */
-describe('cleanTitle', () => {
-  it('drops the repeated brand tail', () => {
-    expect(cleanTitle('FAQ: Custom Websites & AI Models in Pampanga | Kleio')).toBe('FAQ');
-    expect(cleanTitle('Our Work: Websites, AI Tools & Research Projects | Kleio')).toBe('Our Work');
+
+const SID = 'refusal-session-000001';
+let db: DB;
+
+function withStarters(starters: string | null): void {
+  db.prepare(
+    `INSERT INTO sessions (id, origin_url, domain, status, created_at, expires_at, starters)
+     VALUES (?, 'https://acme.test', 'acme.test', 'ready', ?, ?, ?)`,
+  ).run(SID, Date.now(), Date.now() + 86_400_000, starters);
+}
+
+beforeEach(() => { db = openDb(':memory:'); });
+
+describe('refusal suggestions', () => {
+  it('offers verified suggested questions, quoted, at most two', () => {
+    withStarters(JSON.stringify([
+      { text: 'What does this company do?', url: 'https://acme.test/' },
+      { text: 'Tell me about Kitchen Fitouts', url: 'https://acme.test/' },
+      { text: 'How do I get in touch?', url: 'https://acme.test/' },
+    ]));
+    const text = refusalText(refusalSuggestions(db, SID, 'do you sell helicopters?'));
+    expect(text).toBe("The site doesn't cover that. You could ask “What does this company do?” or “Tell me about Kitchen Fitouts” instead.");
   });
 
-  it('handles dash and middot separators', () => {
-    expect(cleanTitle('Pricing – Acme')).toBe('Pricing');
-    expect(cleanTitle('Contact · Acme')).toBe('Contact');
+  it('never suggests the question that was just refused', () => {
+    withStarters(JSON.stringify([
+      { text: 'How much does it cost?', url: 'https://acme.test/' },
+      { text: 'How do I get in touch?', url: 'https://acme.test/' },
+    ]));
+    expect(refusalSuggestions(db, SID, '  how much does it cost? ')).toEqual(['How do I get in touch?']);
   });
 
-  it('leaves a plain title alone', () => {
-    expect(cleanTitle('About us')).toBe('About us');
+  it('says nothing more than the refusal when there is nothing verified to offer', () => {
+    withStarters(null); // still being verified
+    expect(refusalText(refusalSuggestions(db, SID, 'x'))).toBe("The site doesn't cover that.");
+
+    db = openDb(':memory:');
+    withStarters('[]'); // verified, none survived
+    expect(refusalSuggestions(db, SID, 'x')).toEqual([]);
+
+    db = openDb(':memory:');
+    withStarters('not json');
+    expect(refusalSuggestions(db, SID, 'x')).toEqual([]);
   });
 
-  it('keeps the title when the lead segment is too short to be meaningful', () => {
-    expect(cleanTitle('Go | Acme Corporation')).toBe('Go | Acme Corporation');
-  });
-
-  it('never returns an empty string for a non-empty title', () => {
-    for (const t of ['A | B', 'X: Y', 'Home', 'Book a Free Discovery Call | Kleio, Pampanga']) {
-      expect(cleanTitle(t).length).toBeGreaterThan(0);
-    }
+  it('never carries a citation marker', () => {
+    // A citation asserts the site says something. A refusal says it does not.
+    expect(refusalText(['Tell me about pricing', 'How do I get in touch?'])).not.toMatch(/\[\d+\]/);
+    expect(refusalText([])).not.toMatch(/\[\d+\]/);
   });
 });

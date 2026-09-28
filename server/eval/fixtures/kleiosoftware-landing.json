@@ -1,0 +1,39 @@
+{
+  "site": "https://kleiosoftware.com",
+  "pages": 1,
+  "note": "The default index: the landing page and nothing else, which is what most visitors ever chat with. Answerable questions are grounded in the landing page itself - its hero, services grid, case-study cards, demos, process and contact sections. Absent questions include facts the site states only on inner pages (mobile design is on /faq), because a one-page index that answers those is answering from somewhere other than what it read. If the landing page changes, re-check every list before trusting a run.",
+  "questions": [
+    { "q": "What services does Kleio offer?", "answerable": true, "expect": "portfolio" },
+    { "q": "Is Kleio a one-person studio or a big agency?", "answerable": true, "expect": "one[- ]person|solo|small (software )?studio|single|straight to the person" },
+    { "q": "Where is Kleio based?", "answerable": true, "expect": "pampanga" },
+    { "q": "Do you build custom AI models, or only websites?", "answerable": true, "expect": "ai models?|machine learning" },
+    { "q": "Tell me about the Kinefolk Studio project.", "answerable": true, "expect": "barre" },
+    { "q": "What does the steel connections classifier do?", "answerable": true, "expect": "predict" },
+    { "q": "What is the geotextile material predictor?", "answerable": true, "expect": "recommend|predict" },
+    { "q": "Can I book a discovery call, and does it cost anything?", "answerable": true, "expect": "free" },
+    { "q": "Do you help students with thesis and capstone projects?", "answerable": true, "expect": "capstone|thesis" },
+    { "q": "How long is the discovery call?", "answerable": true, "expect": "15\\D{1,8}45" },
+    { "q": "What's your email address?", "answerable": true, "expect": "kleiosoftware@gmail\\.com" },
+    { "q": "What happens in the first week of a project?", "answerable": true, "expect": "goal|discovery" },
+    { "q": "Can I try a demo before hiring you?", "answerable": true, "expect": "demo" },
+    { "q": "Is Kleio a big agency?", "answerable": true, "expect": "small|one[- ]person|no account manager" },
+
+    { "prev": "Tell me about the Kinefolk Studio project.", "q": "Where is that studio located?", "answerable": true, "expect": "angeles" },
+    { "prev": "What is the geotextile material predictor?", "q": "Who was it built for?", "answerable": true, "expect": "thesis|student|master" },
+    { "prev": "Can I book a discovery call, and does it cost anything?", "q": "How long does it last?", "answerable": true, "expect": "15\\D{1,8}45" },
+    { "prev": "What does the steel connections classifier do?", "q": "Can I try it myself?", "answerable": true, "expect": "open|tool|try|yes" },
+
+    { "q": "What is your refund policy if I cancel halfway through a project?", "answerable": false },
+    { "q": "Does Kleio hold ISO 9001 certification?", "answerable": false },
+    { "q": "Who are Kleio's investors and funding partners?", "answerable": false },
+    { "q": "Do you offer 24/7 emergency phone support?", "answerable": false },
+    { "q": "What are the opening hours of your Manila office?", "answerable": false },
+    { "q": "Do you offer a money-back guarantee?", "answerable": false },
+    { "q": "Can I buy a laptop from you?", "answerable": false },
+    { "q": "Are you open on Saturdays?", "answerable": false },
+    { "q": "Are the websites you build designed for mobile?", "answerable": false },
+    { "prev": "Tell me about the Kinefolk Studio project.", "q": "Did they win any awards for it?", "answerable": false },
+    { "prev": "Can I book a discovery call, and does it cost anything?", "q": "Can I book one on a Sunday?", "answerable": false },
+    { "prev": "What does the steel connections classifier do?", "q": "Is it patented?", "answerable": false }
+  ]
+}

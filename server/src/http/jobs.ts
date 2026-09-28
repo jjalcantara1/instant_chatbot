@@ -5,7 +5,8 @@ import { runIndex, IndexError, type IndexEvent, type IndexErrorCode } from '../i
 import { guardUrl } from '../crawl/ssrf.js';
 import { fetchRobots } from '../crawl/robots.js';
 import { normaliseUrl } from '../crawl/urlnorm.js';
-import { invalidateSession } from '../retrieve/retrieve.js';
+import { indexedWithAnotherModel, invalidateSession } from '../retrieve/retrieve.js';
+import { getEmbedder } from '../indexing/embed.js';
 
 const nanoid = customAlphabet('0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ', 22);
 
@@ -250,6 +251,15 @@ export async function expandSession(
       session.status === 'expanding'
         ? 'More pages are already being read for this session.'
         : 'This session is not ready yet, so there is nothing to add to.',
+    );
+  }
+
+  // Reading more with a different model would mix two vector spaces in one
+  // index, and nothing downstream could tell which half a match came from.
+  if (indexedWithAnotherModel(db, sessionId, getEmbedder())) {
+    throw new ValidationError(
+      'STALE_INDEX',
+      'This session was indexed with a search model the demo no longer uses. Index the site again to read more of it.',
     );
   }
 

@@ -39,8 +39,8 @@ sudo chown -R sitechat:sitechat /srv/sitechat/data /srv/sitechat/backups
 sudo chown -R root:root /srv/sitechat/server /srv/sitechat/web /srv/sitechat/widget
 
 echo "==> 5/7  Swap"
-# jsdom is the memory hog: CONCURRENT_CRAWLS x 6 documents in flight, each up to
-# a 2 MB body. Swap is the difference between a slow crawl and an OOM kill.
+# Crawls are the memory hog: CONCURRENT_CRAWLS x 6 bodies in flight, each up to
+# 2 MB. Swap is the difference between a slow crawl and an OOM kill.
 if ! sudo swapon --show | grep -q /swapfile; then
   sudo fallocate -l 2G /swapfile
   sudo chmod 600 /swapfile

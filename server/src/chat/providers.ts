@@ -60,6 +60,63 @@ class AnthropicChat implements ChatModel {
   }
 }
 
+/**
+ * Start `attempt`, and if it has produced nothing after `delayMs`, start a
+ * second copy and settle with whichever responds first. The other is aborted,
+ * and a response that arrives after the race was decided is handed to
+ * `discard` so its connection is released.
+ *
+ * "Responds" means the promise settles - for an HTTP call, the headers are
+ * back, whatever their status. A fast 429 therefore wins and is reported as
+ * usual; hedging is only for silence. An attempt that fails outright before
+ * the delay starts the second immediately, so a dropped connection costs one
+ * retry rather than an error. The call fails only once every attempt has.
+ */
+export function hedge<T>(
+  attempt: (signal: AbortSignal) => Promise<T>,
+  delayMs: number,
+  discard: (late: T) => void = () => {},
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const controllers: AbortController[] = [];
+    let settled = false;
+    let failures = 0;
+    let timer: NodeJS.Timeout | undefined;
+
+    const canHedge = (): boolean => delayMs > 0 && controllers.length < 2;
+
+    const launch = (): void => {
+      const controller = new AbortController();
+      controllers.push(controller);
+      attempt(controller.signal).then(
+        (value) => {
+          if (settled) { discard(value); return; }
+          settled = true;
+          clearTimeout(timer);
+          for (const other of controllers) if (other !== controller) other.abort();
+          resolve(value);
+        },
+        (err: unknown) => {
+          failures++;
+          if (settled) return;
+          if (canHedge()) { clearTimeout(timer); launch(); return; }
+          if (failures === controllers.length) {
+            settled = true;
+            clearTimeout(timer);
+            reject(err);
+          }
+        },
+      );
+    };
+
+    launch();
+    if (canHedge()) {
+      timer = setTimeout(() => { if (!settled && canHedge()) launch(); }, delayMs);
+      timer.unref?.();
+    }
+  });
+}
+
 interface GeminiChunk {
   candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
   usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number };
@@ -75,25 +132,35 @@ class GeminiChat implements ChatModel {
     const url =
       `${config.geminiBaseUrl}/v1beta/models/${encodeURIComponent(this.name)}` +
       ':streamGenerateContent?alt=sse';
-
-    const res = await request(url, {
-      method: 'POST',
-      headers: {
-        'x-goog-api-key': this.apiKey,
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        // Gemini names the assistant role "model"; everything else maps over.
-        contents: req.messages.map((m) => ({
-          role: m.role === 'assistant' ? 'model' : 'user',
-          parts: [{ text: m.content }],
-        })),
-        systemInstruction: { parts: [{ text: req.system }] },
-        generationConfig: { maxOutputTokens: req.maxTokens },
-      }),
-      headersTimeout: 30_000,
-      bodyTimeout: 120_000,
+    const body = JSON.stringify({
+      // Gemini names the assistant role "model"; everything else maps over.
+      contents: req.messages.map((m) => ({
+        role: m.role === 'assistant' ? 'model' : 'user',
+        parts: [{ text: m.content }],
+      })),
+      systemInstruction: { parts: [{ text: req.system }] },
+      generationConfig: { maxOutputTokens: req.maxTokens },
     });
+
+    // Most calls start streaming in about a second, but roughly one in twenty
+    // sends no headers at all until the timeout. A second request started
+    // after CHAT_HEDGE_MS turns that 30-second wait and error into a few
+    // seconds' delay, for the cost of an occasional duplicate prompt.
+    const res = await hedge(
+      (signal) => request(url, {
+        method: 'POST',
+        headers: {
+          'x-goog-api-key': this.apiKey,
+          'content-type': 'application/json',
+        },
+        body,
+        signal,
+        headersTimeout: 30_000,
+        bodyTimeout: 120_000,
+      }),
+      config.chatHedgeMs,
+      (late) => { late.body.destroy(); },
+    );
 
     if (res.statusCode >= 400) {
       const body = await res.body.text();

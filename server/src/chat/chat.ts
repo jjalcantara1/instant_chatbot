@@ -32,17 +32,19 @@ function buildSystemPrompt(domain: string, chunks: RetrievedChunk[]): string {
 
 Rules:
 - Use only the excerpts. Do not use outside knowledge about this company or any other.
-- Answer from what the excerpts DO say. If they cover the subject but not the
+- Answer from what the excerpts DO say. If they answer the question without the
   exact detail asked — the site explains how pricing works without printing a
   number, say — then give what the site does say and cite it. That is a real
   answer, not a refusal. Declining here would be wrong and unhelpful.
 - Short or vague questions still deserve an answer. Read "how much" as a
   question about pricing and answer it from the pricing excerpts.
-- Only decline when the excerpts do not address the subject at all. Then say
-  plainly that the site does not cover it, suggest what the visitor could ask
-  instead, and cite NO page numbers anywhere in the reply — not on the
-  suggestion either. A citation means the site genuinely says this, so citing a
-  page while declining is wrong. A reply that declines contains no [1] or [2].
+- Decline when the excerpts do not answer what was asked. Sharing a topic is not
+  an answer: excerpts describing a bakery's cakes do not say whether it
+  delivers. Then say plainly that the site does not cover it, suggest what the
+  visitor could ask instead, and cite NO page numbers anywhere in the reply —
+  not on the suggestion either. Do not pad a refusal with related facts. A
+  citation means the site genuinely says this, so citing a page while declining
+  is wrong. A reply that declines contains no [1] or [2].
 - Cite the pages you used by their number, like [1] or [2][3], but only when you
   are actually answering from them.
 - Be concise. Two or three sentences unless more is genuinely needed.
@@ -53,6 +55,39 @@ Rules:
 
 Excerpts:
 ${excerpts}`;
+}
+
+/**
+ * How a declining reply opens. The prompt tells the model to say "the site
+ * doesn't cover that" in exactly these words, so the opening is where a
+ * refusal announces itself.
+ */
+const REFUSAL_OPENING = /^\s*the site (?:doesn['’]t|does not|didn['’]t|did not)(?: explicitly| specifically| directly)? (?:cover|say|mention|state|specify|include|list|address|describe)/i;
+
+/** Held back until the opening can be judged; a sentence end decides sooner. */
+const OPENING_CHARS = 48;
+
+/**
+ * Removes [n] citation markers from a stream of text, including a marker split
+ * across two pieces ("[" then "1]").
+ */
+export class CitationStripper {
+  private carry = '';
+
+  push(text: string): string {
+    const s = this.carry + text;
+    // Trailing whitespace is held too: if the next piece opens with a marker,
+    // the space before it goes with it.
+    const tail = /\s*(?:\[\d{0,2})?$/.exec(s) as RegExpExecArray;
+    this.carry = tail[0];
+    return s.slice(0, tail.index).replace(/\s*\[\d{1,2}\]/g, '');
+  }
+
+  flush(): string {
+    const rest = this.carry.replace(/\s*\[\d{1,2}\]/g, '');
+    this.carry = '';
+    return rest;
+  }
 }
 
 /** Pull [1], [2][3] out of the finished text and map back to real pages. */
@@ -75,40 +110,35 @@ export function parseCitations(text: string, chunks: RetrievedChunk[]): ChatSour
 }
 
 /**
- * Page titles are written for search engines: "FAQ: Custom Websites & AI Models
- * in Pampanga | Kleio". Read back verbatim in a refusal that sounds like a
- * machine reciting metadata, so keep the leading segment and drop the brand
- * tail that every page repeats.
+ * What to offer instead when a question is refused: the session's suggested
+ * questions, every one already verified to be answerable.
+ *
+ * This used to offer page titles. Titles are written for search engines, so a
+ * refusal ended "You could ask about FAQ, Web Developer in Pampanga or AI
+ * Programmer in Pampanga instead" - two of which the app would itself refuse,
+ * the exact failure the suggested questions exist to prevent.
  */
-export function cleanTitle(title: string): string {
-  const head = title.split(/\s+[|–—·]\s+/)[0]?.trim() ?? title.trim();
-  const kept = head.length >= 3 ? head : title.trim();
-  // "FAQ: Custom Websites & AI Models in Pampanga" -> "FAQ". The half before
-  // the colon is the page's actual name; the rest is written for search.
-  // 3 characters, so a real name like "FAQ" survives.
-  const lead = (kept.split(/:\s+/)[0] ?? kept).trim();
-  return lead.length >= 3 ? lead : kept;
-}
-
-function suggestionsFrom(db: DB, sessionId: string): string[] {
-  const rows = db.prepare(
-    `SELECT title FROM pages WHERE session_id = ? AND status = 'ok' AND title IS NOT NULL
-     ORDER BY char_count DESC LIMIT 8`,
-  ).all(sessionId) as Array<{ title: string }>;
-
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const r of rows) {
-    const t = cleanTitle(r.title ?? '');
-    const key = t.toLowerCase();
-    if (t && !seen.has(key)) { seen.add(key); out.push(t); }
+export function refusalSuggestions(db: DB, sessionId: string, question: string): string[] {
+  const row = db.prepare('SELECT starters FROM sessions WHERE id = ?')
+    .get(sessionId) as { starters: string | null } | undefined;
+  if (!row?.starters) return [];
+  try {
+    const parsed = JSON.parse(row.starters) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    const asked = question.trim().toLowerCase();
+    return parsed
+      .map((s) => (s as { text?: unknown }).text)
+      .filter((t): t is string => typeof t === 'string' && t.trim().toLowerCase() !== asked)
+      .slice(0, 2);
+  } catch {
+    return [];
   }
-  return out;
 }
 
-function listPhrase(items: string[]): string {
-  if (items.length <= 1) return items[0] ?? '';
-  return `${items.slice(0, -1).join(', ')} or ${items[items.length - 1] as string}`;
+export function refusalText(suggestions: string[]): string {
+  const quoted = suggestions.map((s) => `“${s}”`);
+  const hint = quoted.length === 0 ? '' : ` You could ask ${quoted.join(' or ')} instead.`;
+  return `The site doesn't cover that.${hint}`;
 }
 
 export interface AnswerOptions {
@@ -127,26 +157,26 @@ export async function* streamAnswer(opts: AnswerOptions): AsyncGenerator<ChatEve
 
   yield { type: 'status', stage: 'retrieving' };
 
+  // A follow-up ("who was it built for?") only makes sense next to the
+  // question before it, so retrieval sees that too.
+  const previousQuestion = [...opts.history].reverse().find((t) => t.role === 'user')?.content;
+
   let result;
   try {
-    result = await retrieve(db, sessionId, question, embedder);
+    result = await retrieve(db, sessionId, question, embedder, previousQuestion);
   } catch (e) {
     yield { type: 'error', message: (e as Error).message };
     return;
   }
 
-  // Nothing relevant enough survived the floor. Refuse here rather than handing
-  // the model a weak hand and hoping the prompt holds. This is deterministic,
-  // costs nothing, and is the reason an off-site question cannot be answered
-  // fluently and wrongly.
+  // Nothing on the site is even close. Refuse here without calling the model:
+  // it is deterministic, instant and free. Questions that are close enough to
+  // reach the model are refused by the model when the excerpts do not answer
+  // them, without citing anything.
   if (result.insufficient) {
-    const titles = suggestionsFrom(db, sessionId);
     // Phrased like the model's own refusals so the two do not read as coming
     // from different products.
-    const hint = titles.length > 0
-      ? ` You could ask about ${listPhrase(titles.slice(0, 3))} instead.`
-      : '';
-    const message = `The site doesn't cover that.${hint}`;
+    const message = refusalText(refusalSuggestions(db, sessionId, question));
     for (const word of message.split(/(?<= )/)) {
       yield { type: 'token', text: word };
     }
@@ -165,6 +195,18 @@ export async function* streamAnswer(opts: AnswerOptions): AsyncGenerator<ChatEve
   let inputTokens = 0;
   let outputTokens = 0;
 
+  // A reply that opens by declining is a refusal, and a refusal cites nothing.
+  // The prompt says so, and the model still sometimes declines and then
+  // appends "[1][2][3]" - a citation asserting the site says something, on a
+  // reply saying it does not. With the floor now low enough that absent
+  // questions reach the model, that is enforced here rather than trusted.
+  // Only a reply beginning "The site" is held back, and only until its
+  // opening can be judged; anything else streams from its first token.
+  let opening: string | null = '';
+  let refusing = false;
+  const stripper = new CitationStripper();
+  const emit = (text: string): string => (refusing ? stripper.push(text) : text);
+
   yield { type: 'status', stage: 'generating' };
 
   try {
@@ -180,13 +222,37 @@ export async function* streamAnswer(opts: AnswerOptions): AsyncGenerator<ChatEve
         break;
       }
       full += next.value;
-      yield { type: 'token', text: next.value };
+
+      if (opening !== null) {
+        opening += next.value;
+        const head = opening.trimStart().toLowerCase();
+        const couldDecline = head.startsWith('the site') || 'the site'.startsWith(head);
+        if (couldDecline && !REFUSAL_OPENING.test(opening) && opening.length < OPENING_CHARS && !/[.!?]/.test(opening)) {
+          continue;
+        }
+        refusing = REFUSAL_OPENING.test(opening);
+        const held = emit(opening);
+        opening = null;
+        if (held) yield { type: 'token', text: held };
+        continue;
+      }
+
+      const text = emit(next.value);
+      if (text) yield { type: 'token', text };
     }
   } catch (e) {
     yield { type: 'error', message: (e as Error).message };
     return;
   }
 
-  yield { type: 'sources', sources: parseCitations(full, result.chunks) };
+  if (opening) {
+    refusing = REFUSAL_OPENING.test(opening);
+    const held = emit(opening);
+    if (held) yield { type: 'token', text: held };
+  }
+  const tail = refusing ? stripper.flush() : '';
+  if (tail) yield { type: 'token', text: tail };
+
+  yield { type: 'sources', sources: refusing ? [] : parseCitations(full, result.chunks) };
   yield { type: 'done', inputTokens, outputTokens };
 }

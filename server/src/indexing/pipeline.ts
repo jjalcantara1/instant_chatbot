@@ -3,8 +3,10 @@ import { crawl, type CrawledPage, type FrontierEntry } from '../crawl/crawler.js
 import { findBoilerplateLines, stripBoilerplate } from './boilerplate.js';
 import { chunkPage, type Chunk } from './chunk.js';
 import { embedBatched, getEmbedder, toBlob, type Embedder } from './embed.js';
-import { generateStarters } from '../retrieve/starters.js';
-import { invalidateSession } from '../retrieve/retrieve.js';
+import {
+  candidatesFromRows, chooseStarters, storedCandidateRows, type Candidate, type CandidateRow,
+} from '../retrieve/starters.js';
+import { embedQueries, invalidateSession } from '../retrieve/retrieve.js';
 import type { DB } from '../db.js';
 
 export type IndexEvent =
@@ -24,7 +26,7 @@ export type IndexEvent =
 
 export type IndexErrorCode =
   | 'INVALID_URL' | 'BLOCKED_HOST' | 'ROBOTS_DISALLOWED' | 'UNREACHABLE'
-  | 'NOT_HTML' | 'SPA_DETECTED' | 'TOO_SMALL' | 'RATE_LIMITED' | 'INTERNAL';
+  | 'NOT_HTML' | 'SPA_DETECTED' | 'TOO_SMALL' | 'RATE_LIMITED' | 'STALE_INDEX' | 'INTERNAL';
 
 export class IndexError extends Error {
   constructor(public readonly code: IndexErrorCode, message: string) {
@@ -104,17 +106,18 @@ export async function runIndex(opts: RunIndexOptions): Promise<IndexResult> {
     'INSERT INTO pages (session_id, url, title, status, char_count) VALUES (?, ?, ?, ?, ?)',
   );
   const insertChunk = db.prepare(
-    'INSERT INTO chunks (session_id, page_id, heading_path, text, tokens, embedding) VALUES (?, ?, ?, ?, ?, ?)',
+    'INSERT INTO chunks (session_id, page_id, heading_path, text, tokens, embedding, headings) VALUES (?, ?, ?, ?, ?, ?, ?)',
   );
   const updateSession = db.prepare(
     `UPDATE sessions
         SET status = ?, page_count = ?, chunk_count = ?,
-            root_url = ?, page_budget = ?, discovered = ?
+            root_url = ?, page_budget = ?, discovered = ?, embedding_model = ?
       WHERE id = ?`,
   );
 
   const buffered: CrawledPage[] = [];
   const pageIds = new Map<CrawledPage, number>();
+  const pageUrls = new Map<number, string>();
   let boilerplate: Set<string> | null = null;
 
   const pendingEmbed: PendingChunk[] = [];
@@ -172,7 +175,10 @@ export async function runIndex(opts: RunIndexOptions): Promise<IndexResult> {
 
       const writeAll = db.transaction((rows: PendingChunk[], vecs: Float32Array[]) => {
         rows.forEach((row, i) => {
-          insertChunk.run(sessionId, row.pageId, row.headingPath || null, row.text, row.tokens, toBlob(vecs[i] as Float32Array));
+          insertChunk.run(
+            sessionId, row.pageId, row.headingPath || null, row.text, row.tokens,
+            toBlob(vecs[i] as Float32Array), JSON.stringify(row.headings),
+          );
         });
       });
       writeAll(batch, res.vectors);
@@ -196,6 +202,7 @@ export async function runIndex(opts: RunIndexOptions): Promise<IndexResult> {
       onPage: (page) => {
         const pageId = savePage(page);
         pageIds.set(page, pageId);
+        pageUrls.set(pageId, page.url);
         pagesFetched++;
 
         emit({
@@ -244,6 +251,27 @@ export async function runIndex(opts: RunIndexOptions): Promise<IndexResult> {
 
   emit({ type: 'stage', stage: 'indexing' });
   crawlDone = true;
+
+  // Every chunk this pass will write exists now, stored or still queued, and
+  // suggested questions are built from their headings alone. So their one
+  // embedding request can go out alongside the documents' instead of after
+  // them: on the default one-page index that was a whole sequential round
+  // trip between the crawl finishing and the chat opening.
+  //
+  // Not when requests are paced (EMBEDDING_MIN_INTERVAL_MS), though. Pacing
+  // hands out slots in call order, so the suggestions would take the first
+  // slot and the documents - which the visitor is actually waiting for -
+  // would sit out a whole interval behind them. Paced, the documents go first
+  // and the suggestions follow, as `ready` only waits briefly for them.
+  const overlapStarters = config.embeddingMinIntervalMs <= 0;
+  const earlyPlan = overlapStarters
+    ? planStarters(db, sessionId, embedder, pendingEmbed.map((c) => ({
+      url: pageUrls.get(c.pageId) ?? '',
+      headingPath: c.headingPath,
+      headings: c.headings,
+    })))
+    : null;
+
   await embedLoop;
   if (embedError) throw embedError;
 
@@ -273,6 +301,7 @@ export async function runIndex(opts: RunIndexOptions): Promise<IndexResult> {
     Math.max(budget, maxPages, totals.pages),
     // Sticky: once discovery has been paid for, a later pass must not pay again.
     summary.sitemapUsed || alreadyDiscovered ? 1 : 0,
+    embedder.name,
     sessionId,
   );
 
@@ -282,10 +311,10 @@ export async function runIndex(opts: RunIndexOptions): Promise<IndexResult> {
     ).run(sessionId, 'embed', embedder.name, embedTokens, 0, Date.now());
   }
 
-  // Suggestions are computed from chunks that are now committed, so the
-  // retrieval cache has to be dropped before they are verified against it.
+  // Suggestions are verified against chunks that are now committed, so the
+  // retrieval cache has to be dropped before they are checked.
   invalidateSession(sessionId);
-  await refreshStarters(db, sessionId, embedder);
+  await refreshStarters(db, sessionId, earlyPlan ?? planStarters(db, sessionId, embedder, []));
 
   const frontierSize = countFrontier(db, sessionId);
   const elapsedMs = Date.now() - started;
@@ -340,13 +369,38 @@ export async function settleStarters(): Promise<void> {
   await Promise.allSettled([...pendingStarters]);
 }
 
+interface StarterPlan {
+  candidates: Candidate[];
+  /** In flight while the documents are still embedding. Never rejects. */
+  vectors: Promise<Array<Float32Array | undefined>>;
+  error: () => Error | null;
+}
+
 /**
- * Compute and store this session's suggested questions.
+ * Build this session's candidate questions - from chunks earlier passes stored
+ * plus the ones this pass has queued - and start embedding them now.
+ */
+function planStarters(db: DB, sessionId: string, embedder: Embedder, pending: CandidateRow[]): StarterPlan {
+  const candidates = candidatesFromRows([...storedCandidateRows(db, sessionId), ...pending]);
+  let failure: Error | null = null;
+  const vectors = candidates.length === 0
+    ? Promise.resolve([])
+    : embedQueries(embedder, candidates.map((c) => c.text)).catch((e: unknown) => {
+      // Held rather than thrown: the pass may yet fail on its own account,
+      // and this must not surface as an unhandled rejection if it does.
+      failure = e as Error;
+      return [];
+    });
+  return { candidates, vectors, error: () => failure };
+}
+
+/**
+ * Verify and store this session's suggested questions.
  *
  * Never throws. Suggestions are a nicety; an index that works must not be
  * failed because the extra embedding call for them did not.
  */
-async function refreshStarters(db: DB, sessionId: string, embedder: Embedder): Promise<void> {
+async function refreshStarters(db: DB, sessionId: string, plan: StarterPlan): Promise<void> {
   const store = (starters: Array<{ text: string; url: string }>): void => {
     // The wait below is bounded, so this can land after the caller has moved
     // on and closed up. A closed handle is that caller's business, not a fault
@@ -360,8 +414,13 @@ async function refreshStarters(db: DB, sessionId: string, embedder: Embedder): P
     }
   };
 
-  const job = generateStarters(db, sessionId, embedder)
-    .then(store)
+  const job = plan.vectors
+    .then((vectors) => {
+      const failure = plan.error();
+      if (failure) throw failure;
+      if (!db.open) return;
+      store(chooseStarters(db, sessionId, plan.candidates, vectors));
+    })
     .catch((e: unknown) => {
       // An empty array, not a null: the client should stop waiting rather than
       // sit on a pending state forever.

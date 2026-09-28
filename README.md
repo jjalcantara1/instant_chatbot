@@ -60,8 +60,12 @@ Measured with `npm run crawl`, crawl phase only, same machine and network:
 | `11ty.dev` — 1,100+ pages | 15,828 ms | **2,008 ms** | **7.9× faster** |
 
 End to end through the HTTP API, including session creation, embedding and the
-SSE handshake, a default index of `kleiosoftware.com` completes in **~2.4 s**
-wall clock and produces 9 chunks from 2,192 characters.
+SSE handshake, a default index of `kleiosoftware.com` on a freshly started
+server completes in **~1.6 s** wall clock — 3.7 s before extraction moved off
+jsdom and suggestion verification moved alongside document embedding — and
+produces 7 chunks holding 4,000 characters of the page, twice what it used to
+keep. Clicking one of the suggested questions then reaches the model with no
+embedding round trip at all, because its vector was computed while verifying it.
 
 Three things account for the gain, and only the first is the page cap itself:
 
@@ -73,7 +77,7 @@ flowchart LR
     end
     subgraph NEW["New default"]
         direction TB
-        N1["robots.txt<br/>(fetched once, cached)"] --> N3["1 page fetch"] --> N4["embed<br/>~9 chunks"]
+        N1["robots.txt<br/>(fetched once, cached)"] --> N3["1 page fetch"] --> N4["embed<br/>~7 chunks"]
     end
     OLD -.->|"2.7×–7.9× faster"| NEW
 ```
@@ -120,7 +124,7 @@ sequenceDiagram
     C->>C: resolve seed redirects
     C-->>V: stage: resolving / robots / crawling
     loop each page, up to the budget
-        C->>C: fetch + extract (Readability → fallback)
+        C->>C: fetch + extract (main content, one parse)
         C-->>V: page event (url, title, chars)
         C->>DB: INSERT page
         C->>E: queue chunks
@@ -237,7 +241,7 @@ still going.
 ```mermaid
 flowchart LR
     subgraph CRAWL["Crawl — up to 6 workers"]
-        F["fetch"] --> X["extract<br/>Readability → fallback"]
+        F["fetch"] --> X["extract<br/>main content, one parse"]
         X --> L["links → priority queue"]
         X --> SEC["sections<br/>(h1–h3 heading path)"]
     end
@@ -247,14 +251,46 @@ flowchart LR
     HOLD --> BUF
     BUF -->|"yes / crawl ended"| STRIP["strip lines appearing<br/>on over 60% of pages"]
 
-    STRIP --> CH["chunk<br/>800 chars, 120 overlap,<br/>sentence-aligned"]
+    STRIP --> PACK["pack small sections<br/>under one parent"]
+    PACK --> CH["chunk<br/>800 chars, 120 overlap,<br/>sentence-aligned"]
     CH --> Q[("embed queue")]
     Q --> EM["embedBatched<br/>100/batch × 4 parallel"]
     EM --> BLOB["Float32Array → BLOB"]
     BLOB --> DB[("SQLite")]
 ```
 
-Three decisions worth calling out:
+Five decisions worth calling out:
+
+**Extraction reads the page, not an article.** It used to be Readability,
+which is built to find the one article in a page. A landing page is not an
+article: on `kleiosoftware.com` it kept one block and discarded the services
+grid, every case study and the contact details, so the default one-page index
+told visitors *"the site does not cover the Kinefolk Studio project"* while that
+project sat on its front page. Extraction now takes the page's `<main>` (or its
+only `<article>`, or the body), strips page-level navigation, headers, footers
+and forms, and walks every text node once, the way the page renders:
+
+| Measured on 20 pages across 12 sites | Readability (before) | Now |
+|---|---:|---:|
+| Content text that reaches the index | 66% | **94%** |
+| `kleiosoftware.com` landing page | 50% | **95%** |
+| `python.org` / `squarespace.com` landing pages | 9% / 3% | **91% / 93%** |
+| Time per page, warm (same run, same 8 pages) | 177–1,028 ms | 19–207 ms |
+
+The speed matters twice over: parsing is synchronous, so while jsdom worked
+through a page every other visitor's stream stalled behind it. The walker also
+separates adjacent inline elements that the browser would lay out apart —
+`<a>Tell us what you need</a><a>See our work</a>` used to fuse into "needSee" —
+and keeps a table row on one line.
+
+**Small sections are packed, not dropped.** Cards, process steps and contact
+details are each a heading and a line. Alone, most fall under the 80-character
+chunk floor and vanished — the email address, "a quick 15 to 45 minute chat",
+what each service is. Runs of small sections under the same parent heading are
+now merged up to the 800-character target, each member's heading inlined, so
+one chunk answers "what services do you offer?". Runs never cross into a
+different parent section, and the chunk remembers every heading packed into it
+(`chunks.headings`), which is where suggested questions find them.
 
 **Boilerplate detection is a sampled warm-up.** Nav, cookie banners and footers
 survive extraction on plenty of sites, and a line appearing on most pages is
@@ -279,51 +315,198 @@ broken and hands the embedder a garbled opening token.
 ## Retrieval, and the "not on this site" guarantee
 
 The demo's credibility rests on one property: **it must not answer a question
-the site does not cover.** That is enforced structurally, not by asking the
-model nicely.
+the site does not cover.** Three layers enforce it, and only the middle one
+relies on the model's judgement:
+
+1. A **similarity floor** refuses anything plainly unrelated to the site,
+   deterministically, without calling the model.
+2. The **model** decides the rest from the excerpts it is shown, and must cite
+   what it answers from.
+3. A reply that **opens by declining carries no citations**, whatever the model
+   appended. The prompt asks for that; the stream enforces it, because the
+   model sometimes declines and then adds "[1][2][3]" anyway.
+
+A citation asserts the site genuinely says this, so a refusal is a turn that
+cites nothing — and `npm run eval` fails if any absent question comes back
+with a citation.
 
 ```mermaid
 flowchart TB
-    Q["question"] --> EMB["embed as 'query'<br/>(Voyage distinguishes<br/>query from document)"]
+    Q["question<br/>(+ the previous one, for a follow-up)"] --> EMB["embed as 'query'<br/>one request"]
     EMB --> A["Rank A — dense<br/>cosine over all chunks<br/>top 20"]
     Q --> B["Rank B — lexical<br/>BM25 over title +<br/>heading path + text<br/>top 20"]
     A --> RRF["reciprocal rank fusion<br/>Σ 1 / (60 + rank)"]
     B --> RRF
-    RRF --> TOP["top 6"]
-    TOP --> FLOOR{"raw cosine ≥<br/>MIN_COSINE?"}
+    RRF --> FLOOR{"raw cosine ≥<br/>MIN_COSINE?"}
     FLOOR -->|"fails"| DROP["dropped, however<br/>much BM25 liked it"]
-    FLOOR -->|"passes"| COUNT{"≥ 2 survivors?"}
+    FLOOR -->|"passes"| TOP["best 6"]
+    TOP --> COUNT{"anything left?"}
     COUNT -->|"no"| REFUSE["deterministic refusal<br/>the model is never called"]
-    COUNT -->|"yes"| GEN["stream answer<br/>with [n] citations"]
+    COUNT -->|"yes"| GEN["stream the answer:<br/>cited, or declined<br/>with no citations"]
 
     style REFUSE fill:#9B2C1E,color:#fff
     style GEN fill:#5B2A86,color:#fff
 ```
 
-The floor is the load-bearing part. RRF will *always* return a ranked list,
-however irrelevant, because BM25 happily matches a stray token. Without the
-floor the model receives six confident-looking excerpts about nothing in
-particular and writes a fluent wrong answer.
+**The floor used to carry the whole guarantee, and it cannot.** It was set at
+0.35 for voyage-3-lite on an 8-page index, with a second rule on top: at least
+two chunks had to clear it. Re-measured on all 17 pages of `kleiosoftware.com`
+with twice the questions, raw cosine does not separate answerable questions
+from absent ones at any value:
+
+| Question | Top cosine |
+|---|---:|
+| One-line facts on the landing page (email, call length, a case study) — right chunk ranked first | 0.25–0.34 |
+| Absent questions that name the brand ("Does Kleio hold ISO 9001 certification?") | up to 0.49 |
+
+At 0.35 and two chunks, the default one-page index refused its own email
+address, while on the full site four of the five absent eval questions got past
+the floor anyway and were refused only because the model declined. So the
+floor is now what it can honestly be — a filter for the plainly unrelated,
+0.25 for voyage-3-lite — and one chunk is enough, because a fact a page states
+once lives in exactly one chunk.
+
+**The floor is applied before the cut to six, not after.** RRF always returns a
+ranked list, because BM25 happily matches a stray token. Cutting first let
+those lexical matches take all six slots and then be thrown away by the floor,
+refusing questions that a better chunk just below the cut would have answered.
+Paraphrased questions — no words in common with the page — suffered most.
+
+**Follow-ups are searched with the question before them.** "Who was it built
+for?" says nothing about what "it" is. Retrieval embeds the question alone and
+with the previous question prepended, in one request, and fuses the two
+rankings the way it fuses dense and lexical ones — by summing each chunk's
+scores. The combined search finds what the pronoun refers to, the standalone
+one keeps a change of subject working, and a chunk that is right for both
+outranks one that is merely on the topic. Keeping each search's best score
+instead let "Can I try it myself?", asked after the steel classifier, fill all
+six slots with that case study's other sections — its call to action first —
+while the chunk saying the tool is "deployed, public, and clickable today"
+never reached the model.
 
 The floor value is a property of the **embedding model's cosine distribution**,
 not of the site, so it does not carry across providers:
 
 | Embedding provider | `MIN_COSINE` default | Basis |
 |---|---:|---|
-| `voyage` (voyage-3-lite) | 0.35 | Measured: separates cleanly anywhere in 0.35–0.375 |
-| `openai` (text-embedding-3-small) | 0.25 | Measured |
+| `local` (bge-small-en-v1.5) | 0.45 | Measured: weakest real answer 0.479; off-topic questions land 0.45–0.55, so nearly all reach the model |
+| `voyage` (voyage-3-lite) | 0.25 | Measured: single-sentence facts rank first at 0.25–0.34 |
+| `openai` (text-embedding-3-small) | 0.25 | Measured for the old two-chunk gate; not re-measured |
 | `gemini` | 0.50 | Provisional until `npm run eval` is run against it |
 | `hash` (offline dev) | 0.50 | Provisional; geometry too poor to separate at all |
 
-`npm run eval` calibrates the floor against real embeddings using 15 questions —
-10 answerable, 5 deliberately absent — and **fails the build if any absent
-question gets answered**. `test/retrieval-gate.test.ts` asserts the same
-property offline, with no API key.
+### Embeddings without a key
 
-Two further defences sit on top: the system prompt forbids citing a page while
-declining (a citation asserts the site genuinely says this), and
-`parseCitations` maps `[n]` markers back to real pages, so a hallucinated
-citation number resolves to nothing rather than to a plausible wrong link.
+`EMBEDDING_PROVIDER=local` runs an open embedding model inside the server with
+[transformers.js](https://huggingface.co/docs/transformers.js): no key, no
+quota, no network round trip per question. It exists because the free hosted
+tiers were the bottleneck — an unbilled Voyage key allows 3 requests a minute,
+so every question's embedding queued behind a pacing slot shared by every
+visitor.
+
+The model was chosen by measurement: each candidate re-embedded the 216 chunks
+of the final eval's indexes, and every eval question ran through the real
+`retrieve()`, follow-up fusion included.
+
+| Model | Answering chunk in the top 6 | Mean reciprocal rank |
+|---|---:|---:|
+| voyage-3-lite (hosted) | 42/42 | 0.839 |
+| **bge-small-en-v1.5** (the default) | **42/42** | **0.887** |
+| gte-small | 40/42 | 0.863 |
+| snowflake-arctic-embed-s | 40/42 | 0.851 |
+| all-MiniLM-L6-v2 | 41/42 | 0.850 |
+| snowflake-arctic-embed-xs | 41/42 | 0.823 |
+| multilingual-e5-small | 41/42 | 0.799 |
+
+End to end — the same eval, the same chat model, only the embedder changed:
+
+| Fixture | voyage-3-lite | bge-small-en-v1.5 (local) |
+|---|---:|---:|
+| Landing page: answerable / absent refused | 17/18 / 12/12 | **17/18 / 12/12** |
+| Whole site: answerable / absent refused | 19/20 / 11/11 | **17/20 / 11/11** |
+
+Of the whole-site difference, one question was lost to a Gemini timeout that
+outlasted both hedged requests, and one is a follow-up — "How long does it
+last?" after asking about the discovery call — that the local model ranked
+sixth of six (its cosine was the highest of the six; keyword matches on "how
+long does" outranked it) and the model then declined. Handing the model its
+excerpts in cosine order instead would fix that one and raises the answer's
+average position for both embedders, but it undoes part of the follow-up
+fusion for questions like "Can I try it myself?", so it has not been made.
+
+What it costs, with one inference thread (so a small VM's other vCPU stays with
+the event loop) and batches of eight, measured on a desktop CPU, which a
+shared-core VM will not match:
+
+| | |
+|---|---:|
+| Embedding a question | ~7 ms, versus a network round trip |
+| The default one-page index (7 chunks + ~20 suggestion candidates) | ~0.5 s |
+| A 17-page site (209 chunks) | ~14 s |
+| Memory: model loaded / extra while embedding a large site | ~80 MB / up to ~100 MB, held |
+| Disk: `node_modules` / the model | ~470 MB / 34 MB |
+
+The model downloads once into `EMBEDDING_CACHE_DIR` (default: a `models/`
+folder next to the database — under the systemd unit, the only writable
+place) and is loaded at boot, so the first visitor after a deploy does not
+wait for it. It is English-only; a site in another language retrieves
+noticeably worse than it did on Voyage.
+
+Vectors from two models cannot be compared, and a dot product over mismatched
+vectors still returns numbers. So each session records the model that indexed
+it, and a session that outlives a change of `EMBEDDING_PROVIDER` is refused —
+chat and "read more" alike — with a message to index the site again, rather
+than searched with the wrong geometry for the rest of its 24 hours.
+
+### The eval
+
+`npm run eval` runs a fixture end to end — index, retrieve, answer with the
+real model — and grades the replies. There are two fixtures, because the
+default index and the whole site fail differently:
+
+| Fixture | Pages | Answerable | Absent |
+|---|---:|---:|---:|
+| `kleiosoftware-landing.json` — what most visitors chat with | 1 | 18 | 12 |
+| `kleiosoftware.json` — the whole site | 25 | 20 | 11 |
+
+An answerable question passes only if the reply is cited **and** contains an
+expected fact; a cited reply that talks around the question is not an answer.
+The sets include paraphrases, which share no words with the page, and
+follow-ups, asked after their previous question with real history. Absent
+questions include follow-ups whose subject the site covers but whose detail it
+does not ("Can I book one on a Sunday?" after asking about discovery calls),
+and — on the landing fixture — facts the site states only on inner pages.
+Every question is embedded in one request up front, and a provider error is
+reported as an error, never scored as a refusal. On quota-limited keys, pace
+it — `EMBEDDING_BATCH_SIZE=32 EMBEDDING_CONCURRENCY=1
+EMBEDDING_MIN_INTERVAL_MS=25000 npm run eval -- --pace 5000` — and reuse an
+index with `--reuse SESSION_ID` rather than re-embedding it. A run of both
+fixtures is roughly 75 chat requests, about 15% of a free-tier Gemini day.
+
+Same eval, same site, before and after this round of changes:
+
+| Fixture | Answerable, before | After | Absent refused, before | After |
+|---|---:|---:|---:|---:|
+| Landing page (default index) | 3/18 | **17/18** | 11/11 ¹ | **12/12** |
+| Whole site | 16/20 | **19/20** | 11/11 | **11/11** |
+
+¹ Plus one question lost to a provider timeout, which the harness reports as
+an error rather than a refusal. The baseline landing run lost three answers to
+Gemini header timeouts; the final runs lost none.
+
+Both remaining misses are follow-ups the model declined — the safe direction.
+On the landing page, "Who was it built for?" about a case study whose card says
+only "(Built for a master's thesis project.)" is declined in every sample: the
+answer is retrieved first, and the model does not read a project as a *who*. On
+the whole site, "Can I try it myself?" was a retrieval miss that rank fusion of
+follow-ups (above) fixes offline — the answer moves from absent to first among
+the six excerpts — but the eval could not be re-run on it the same day: the
+Gemini key's free tier allows 500 requests a day, and this work spent them.
+
+`test/retrieval-gate.test.ts` and `test/chat-stream.test.ts` assert the
+structural parts offline, with no API key. `parseCitations` then maps `[n]`
+markers back to real pages, so a hallucinated citation number resolves to
+nothing rather than to a plausible wrong link.
 
 ### Suggested questions are verified, not guessed
 
@@ -347,42 +530,59 @@ Measured against voyage-3-lite on a real index:
 | Page title *(what it used to do)* | 4/4 | **0.379** |
 
 Heading-derived questions clear the floor by 0.10 or more; title-derived ones
-cleared it by as little as 0.029. But margin is not a guarantee — one candidate
-scored a top cosine of **0.736 and was still refused**, because only one chunk
-cleared the floor and `minChunksForAnswer` is 2.
+cleared it by as little as 0.029. And when suggestions later moved to the
+server, the one title-based suggestion `kleiosoftware.com` was offered — "Tell
+me about Custom Website & AI Development in Pampanga" — was declined by the
+model when clicked. **Page titles are no longer candidates.**
 
-So candidates are generated generously and then run through *the very same
-gate that will answer them*, and only survivors are ever shown:
+Candidates come from the page's headings — including the headings of cards that
+were packed into one chunk, which each chunk records — plus a few generic
+questions. Every one is run through *the very same retrieval that will answer
+it*, and held to a higher bar than answering: its best chunk must clear the
+floor by 0.10, not merely reach it. The floor decides what the model may see; a
+suggestion should be something the page plainly covers. Only survivors are
+ever shown:
 
 ```mermaid
 flowchart TB
     H["question-shaped headings<br/>verbatim"] --> POOL
-    H2["other headings<br/>'Tell me about X'"] --> POOL
+    H2["other headings, incl. packed cards<br/>'Tell me about X'"] --> POOL
     G["generic probes<br/>'How much does it cost?'"] --> POOL
-    T["page title subject<br/>(last resort)"] --> POOL
     POOL["up to 24 candidates"] --> FILTER["drop nav furniture,<br/>hero copy, calls to action"]
     FILTER --> EMB["ONE embedding request<br/>for all of them"]
-    EMB --> GATE{"rankWithVector:<br/>the real gate"}
-    GATE -->|refused| DROP["never shown"]
-    GATE -->|answers| PICK["cover every page first,<br/>then fill remaining slots"]
+    EMB --> GATE{"rankWithVector,<br/>best chunk ≥ floor + 0.10"}
+    GATE -->|no| DROP["never shown"]
+    GATE -->|yes| PICK["every page first,<br/>then every section,<br/>then fill"]
     PICK --> OUT["at most 3, stored on the session"]
 
     style DROP fill:#9B2C1E,color:#fff
     style OUT fill:#5B2A86,color:#fff
 ```
 
-Two details make this affordable. `rankWithVector` splits the ranking half of
+Spreading across sections matters on the default one-page index: three
+questions about three cards of one services grid tell a visitor less than one
+each about services, past work and the process.
+
+Three details make this cheap. `rankWithVector` splits the ranking half of
 `retrieve` from the embedding half, so checking twenty-four candidates costs
 **one** HTTP request rather than twenty-four — the arithmetic is a dot product
-over vectors already in memory, and round trips are the scarce resource on a
-rate-limited key. And the wait is bounded: `ready` fires without the
-suggestions if verification has not landed in 2.5 s, the client polls while
-`startersPending` is true, and an index that works is never failed because the
-extra call for its suggestions did not.
+over vectors already in memory. That request goes out alongside the documents'
+own rather than after them, unless embedding is paced (then the documents go
+first, since pacing hands out slots in call order). And query vectors are kept
+in memory per embedder, so clicking a suggestion — usually a visitor's first
+question — costs no embedding request at all, and the generic probes are
+embedded once per process rather than once per site.
+
+The wait is bounded, too: `ready` fires without the suggestions if verification
+has not landed in 2.5 s, the client polls while `startersPending` is true, and
+an index that works is never failed because the extra call for its suggestions
+did not.
 
 If nothing can be verified, nothing is offered. A landing page that is all hero
 copy legitimately yields one suggestion or none, and that is the honest answer
-rather than three buttons that lead to a refusal.
+rather than three buttons that lead to a refusal. The same verified questions
+are what a deterministic refusal offers instead — it used to read page titles
+back, which made "You could ask about FAQ" a thing the app said.
 
 ---
 
@@ -471,7 +671,8 @@ erDiagram
     }
     CHUNKS {
         INT id PK
-        TEXT heading_path
+        TEXT heading_path "shared by everything in the chunk"
+        TEXT headings "JSON: each packed section's own path"
         TEXT text
         INT tokens
         BLOB embedding "Float32Array, unit-normalised"
@@ -485,10 +686,10 @@ operational simplicity beats running a vector database for a demo that throws
 its data away every 24 hours. Each session's index is cached in memory for 10
 minutes and invalidated explicitly whenever a pass writes new chunks.
 
-`root_url`, `page_budget` and `discovered` were added after first deployment.
-`CREATE TABLE IF NOT EXISTS` will not alter a table that already exists, so
-`db.ts` runs an idempotent `PRAGMA table_info` / `ALTER TABLE ADD COLUMN`
-migration on open.
+`root_url`, `page_budget`, `discovered`, `starters` and `chunks.headings` were
+added after first deployment. `CREATE TABLE IF NOT EXISTS` will not alter a
+table that already exists, so `db.ts` runs an idempotent `PRAGMA table_info` /
+`ALTER TABLE ADD COLUMN` migration on open.
 
 ---
 
@@ -552,6 +753,10 @@ npm install-scripts approve esbuild
 npm install
 ```
 
+It will also list `onnxruntime-node` and `protobufjs`. Leave those unapproved:
+the local embedder only needs onnxruntime's bundled CPU binaries, and its
+postinstall exists to download the CUDA runtime on Linux.
+
 ---
 
 ## Configuration
@@ -563,8 +768,9 @@ npm install
 | `CHAT_PROVIDER` | `anthropic` (default) or `gemini`. |
 | `ANTHROPIC_API_KEY` | Chat, when `CHAT_PROVIDER=anthropic`. Indexing works without it; answering fails. |
 | `GEMINI_API_KEY` | Chat, when `CHAT_PROVIDER=gemini`. |
-| `EMBEDDING_PROVIDER` | `openai` (default), `voyage`, `gemini`, or `hash`. |
-| `OPENAI_API_KEY` | Embeddings. Without it, indexing fails. |
+| `EMBEDDING_PROVIDER` | `openai` (default), `voyage`, `gemini`, `local` (in-process, no key — see [Embeddings without a key](#embeddings-without-a-key)), or `hash`. |
+| `OPENAI_API_KEY` | Embeddings, when `EMBEDDING_PROVIDER=openai`. Without it, indexing fails. |
+| `EMBEDDING_CACHE_DIR` | Where `local` keeps its downloaded model. Defaults to `models/` next to the database. |
 | `IP_HASH_SALT` | Salts the rate-limit IP hashes. **Change from the default.** |
 | `ADMIN_TOKEN` | Bearer token for `/admin/stats`. Unset disables the route. |
 | `PUBLIC_WIDGET_ORIGIN` | Public origin of *this API*. The embed snippet is built from it, so it must be where `widget.js` is actually served — not where the demo page is hosted. |
@@ -580,7 +786,15 @@ Chat sits behind a one-function interface in
 [providers.ts](server/src/chat/providers.ts), the same way the embedder does.
 Adding a provider means writing one `ChatModel` and touching nothing else.
 Speed is the product here, so no thinking or `effort` parameter is requested
-from either provider.
+from either provider — and none is needed: `gemini-3.5-flash-lite` reports zero
+thinking tokens without one.
+
+Gemini requests are **hedged**. Most start streaming in about a second, but
+about one call in twenty sent no headers at all until the 30-second timeout,
+leaving a visitor watching "writing an answer" before an error. If the first
+request has sent nothing back after `CHAT_HEDGE_MS` (4 s), an identical second
+one starts and whichever answers first is streamed; the other is cancelled. A
+fast error still wins the race and is reported as before.
 
 `ANTHROPIC_WORKSPACE_ID` is only needed for an identity-linked Anthropic key,
 which rejects every request without it. `GEMINI_BASE_URL` overrides the Gemini
@@ -602,17 +816,34 @@ endpoint, for a proxy or for tests.
 | `EMBEDDING_BATCH_SIZE` | `100` | Texts per embedding request. |
 | `EMBEDDING_CONCURRENCY` | `4` | Embedding round trips in flight. |
 | `EMBEDDING_MIN_INTERVAL_MS` | `0` | Spacing between request starts, for low-quota keys. |
-| `CONCURRENT_CRAWLS` | `3` | Site-wide. Really "N × 6 concurrent jsdom documents" — memory, not CPU, is the ceiling. |
+| `CONCURRENT_CRAWLS` | `3` | Site-wide. Really "N × 6 fetched pages in flight" — memory, not CPU, is the ceiling. |
 | `INDEX_PER_IP_PER_HOUR` | `3` | New indexes. |
 | `EXPANDS_PER_IP_PER_HOUR` | `10` | Separate budget — reading more is the normal path now. |
 | `MESSAGES_PER_IP_PER_HOUR` | `60` | |
 | `MAX_MESSAGES_PER_SESSION` | `20` | |
 | `DAILY_INDEX_CAP` | `200` | Global. |
 | `MIN_COSINE` | per provider | Retrieval floor. Set only to override. |
+| `CHAT_HEDGE_MS` | `4000` | Start a second chat request if the first is silent this long. `0` disables. |
 
-A free or low-quota embedding key needs roughly `32 / 1 / 21000` for the three
-embedding variables. That completes, but it blows the time budget — which is
-now far more survivable than it was, because the default index is nine chunks.
+An unbilled Voyage key — 3 requests and 10,000 tokens a minute — needs
+`16 / 1 / 21000` for the three embedding variables
+([deploy/env.production.example](deploy/env.production.example) has the
+arithmetic). That completes, but every embedding request then waits for a
+21-second slot shared by all visitors, including the one each question needs
+before its answer can start: a question asked while someone else's index is
+embedding can wait a minute or more. Adding a payment method lifts the limits,
+and the free tokens still apply. Meanwhile two things soften it: clicking a
+suggested question costs no embedding request, and a follow-up's two searches
+share one. Or leave the hosted providers out of it: `EMBEDDING_PROVIDER=local`
+has no limits at all ([Embeddings without a key](#embeddings-without-a-key)),
+and takes `0` for the interval — pacing only ever applied to HTTP providers.
+
+The chat side has a ceiling of its own on a free-tier Gemini key: **500
+requests per model per day**, shared by everything using that Google Cloud
+project, and also a per-minute limit that a handful of simultaneous visitors
+can reach. Past the daily limit every question gets the rate-limit message
+until the quota resets. At 20 messages a session that is 25 fully used
+sessions a day, against a `DAILY_INDEX_CAP` of 200.
 
 ---
 
@@ -623,8 +854,9 @@ npm run crawl -- https://example.com          # crawl only, prints to stdout
 npm run crawl -- https://example.com --max 1  # what the default index actually does
 npm --workspace server run index-site -- URL  # crawl + chunk + embed into SQLite
 npm --workspace server run dump -- SESSION_ID # print a session's chunks to read
-npm run eval                                  # the retrieval-honesty gate
-npm test                                      # 100 tests
+npm run eval                                  # the honesty gate, whole site
+npm run eval -- --fixture eval/fixtures/kleiosoftware-landing.json   # the default index
+npm test                                      # 146 tests
 ```
 
 `npm run crawl` reports the frontier, which is the fastest way to see what a
@@ -690,16 +922,20 @@ per IP per hour · 60 messages per IP per hour · 20 messages per session · 3
 concurrent crawls · 200 indexes per day · sessions swept hourly, TTL 24 h.
 
 The one-page default cuts embedding cost harder than it cuts time. Measured on
-`kleiosoftware.com` with `npm run index-site`, a visitor who never expands now
-costs about **2%** of what they used to:
+`kleiosoftware.com`, a visitor who never expands costs about **4%** of a full
+25-page index:
 
-| | Old default (25 pages) | New default (1 page) |
+| | 25 pages | Default (1 page) |
 |---|---:|---:|
 | Pages fetched | 17 *(site exhausted)* | 1 |
 | Extra HTTP requests besides the pages | up to 8 | 1 |
-| Chunks embedded | 245 | 9 |
-| Embedding tokens | 31,980 | **689** |
-| Index time (crawl + embed) | 5,137 ms | 1,812 ms |
+| Chunks embedded | 209 | 7 |
+| Embedding tokens | 29,177 | **1,139** |
+
+The current extraction keeps roughly twice the landing page's text that
+Readability did (the one-page index was 628 tokens before), and the chunks are
+fuller rather than more numerous: packing small sections cut the full site
+from 245 chunks to 209 while it grew from 100,000 to 113,000 characters.
 
 The "extra requests" row is the fixed overhead a crawl pays before it reads
 anything: robots.txt twice (once in `createSession`, once in the crawler) plus
@@ -730,19 +966,24 @@ Type is [Archivo](https://fonts.google.com/specimen/Archivo) (OFL).
 ## Testing
 
 ```bash
-npm test          # 100 tests, no API key required
-npm run eval      # retrieval honesty against real embeddings — needs a key
+npm test          # 146 tests, no API key required
+npm run eval      # honesty and answers against real models — needs keys
 ```
 
 | Suite | Tests | Covers |
 |---|---:|---|
-| `ssrf.test.ts` | 20 | CIDR blocks, IP literals, internal TLDs, IPv4-mapped IPv6, DNS pinning |
-| `errors.test.ts` | 10 | Every failure code and message; the frontier's persistence, dedupe and expansion semantics |
-| `starters.test.ts` | 13 | Every suggested question is asked back through the real gate |
-| `retrieval-gate.test.ts` | 10 | The cosine floor and the ≥2-chunk rule, offline |
+| `ssrf.test.ts` | 51 | CIDR blocks, IP literals, internal TLDs, IPv4-mapped IPv6, DNS pinning |
+| `errors.test.ts` | 14 | Every failure code and message; the frontier's persistence, dedupe and expansion semantics; suggestions embedding alongside the documents, and after them when paced; the embedding model recorded per session |
+| `starters.test.ts` | 13 | Every suggested question is asked back through the real retrieval; the higher bar; packed-card headings; no titles; spread across sections |
+| `retrieval-gate.test.ts` | 15 | The floor, applied before the top-6 cut; single-chunk answers; follow-ups searched with their previous question in one request and rank-fused; the query-vector cache; sessions indexed by another model refused |
+| `extract.test.ts` | 10 | Card grids in bare divs kept, page chrome dropped, adjacent inline elements not fused, headers inside `<main>` kept, container choice |
+| `chunk.test.ts` | 7 | Small sections packed under their parent, never across sections; one-line facts kept |
 | `redirect.test.ts` | 6 | Seed resolution, off-site redirects, hop limits |
 | `history.test.ts` | 6 | Pairing user turns to answers, dropping orphans |
-| `refusal-text.test.ts` | 5 | Refusals contain no citation markers |
+| `local-embed.test.ts` | 6 | The in-process model (mocked): loaded once and lazily, single-threaded, into the writable cache; query prefix; batches of eight; one inference at a time; a failed download retried |
+| `chat-stream.test.ts` | 6 | A reply that opens by declining loses every citation, even split across stream pieces; answers stream untouched |
+| `hedge.test.ts` | 5 | A silent chat request is raced by a second; the loser is cancelled; fails only when both do |
+| `refusal-text.test.ts` | 4 | Refusals offer verified questions, never page titles, and carry no citation markers |
 | `gemini-stream.test.ts` | 3 | SSE frames split across network chunks |
 
 The tests that matter most are the ones asserting things the product would

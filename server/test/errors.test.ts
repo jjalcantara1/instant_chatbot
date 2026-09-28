@@ -192,6 +192,75 @@ describe('frontier', () => {
   });
 });
 
+describe('suggested questions during indexing', () => {
+  it('embeds candidate questions while the documents are still embedding', async () => {
+    // They depend only on headings, so waiting for the documents first put a
+    // whole round trip between the crawl finishing and the chat opening.
+    scripted = summary([page({ url: 'https://acme.test' })]);
+    const events: string[] = [];
+    const slow = {
+      name: 'slow-docs',
+      dims: 4,
+      async embed(texts: string[], kind: 'document' | 'query' = 'document') {
+        events.push(`${kind}:start`);
+        if (kind === 'document') await new Promise((r) => setTimeout(r, 50));
+        events.push(`${kind}:end`);
+        return { vectors: texts.map(() => new Float32Array([1, 0, 0, 0])), tokens: texts.length };
+      },
+    };
+
+    await runIndex({
+      db, sessionId: SID, url: 'https://acme.test', maxPages: 1, emit: () => {}, embedder: slow,
+    });
+
+    expect(events).toContain('query:start');
+    expect(events.indexOf('query:start')).toBeLessThan(events.indexOf('document:end'));
+  });
+
+  it('lets the documents go first when embedding requests are paced', async () => {
+    // Paced slots are handed out in call order. Suggestions going first would
+    // make the visitor wait out a whole interval for the documents.
+    const { config } = await import('../src/config.js');
+    const mutable = config as { embeddingMinIntervalMs: number };
+    const before = mutable.embeddingMinIntervalMs;
+    mutable.embeddingMinIntervalMs = 1;
+    try {
+      scripted = summary([page({ url: 'https://acme.test' })]);
+      const events: string[] = [];
+      const recording = {
+        name: 'recording',
+        dims: 4,
+        async embed(texts: string[], kind: 'document' | 'query' = 'document') {
+          events.push(kind);
+          return { vectors: texts.map(() => new Float32Array([1, 0, 0, 0])), tokens: texts.length };
+        },
+      };
+      await runIndex({
+        db, sessionId: SID, url: 'https://acme.test', maxPages: 1, emit: () => {}, embedder: recording,
+      });
+      expect(events[0]).toBe('document');
+      expect(events).toContain('query');
+    } finally {
+      mutable.embeddingMinIntervalMs = before;
+    }
+  });
+
+  it('stores the headings each chunk holds', async () => {
+    scripted = summary([page({ url: 'https://acme.test' })]);
+    await run(1);
+    const row = db.prepare('SELECT heading_path AS path, headings FROM chunks WHERE session_id = ?')
+      .get(SID) as { path: string; headings: string };
+    expect(JSON.parse(row.headings)).toEqual([row.path]);
+  });
+
+  it('records which embedding model indexed the session', async () => {
+    scripted = summary([page({ url: 'https://acme.test' })]);
+    await run(1);
+    const row = db.prepare('SELECT embedding_model AS model FROM sessions WHERE id = ?').get(SID) as { model: string };
+    expect(row.model).toBe('hash-dev');
+  });
+});
+
 describe('expiry sweep', () => {
   it('deletes expired sessions and cascades to pages, chunks and messages', () => {
     const fresh = openDb(':memory:');

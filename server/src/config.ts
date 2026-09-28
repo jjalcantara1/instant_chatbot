@@ -46,17 +46,30 @@ function num(key: string, fallback: number): number {
 }
 
 /**
- * The similarity floor in §6.5 step 6 is what stops an off-site question being
- * answered fluently and wrongly, and the raw cosine range it judges is a
- * property of the embedding model, not of the site.
+ * The similarity floor: below it a chunk is treated as unrelated to the
+ * question, and a question with nothing above it is refused without calling
+ * the model. The raw cosine range it judges is a property of the embedding
+ * model, not of the site.
  *
- * Measured on kleiosoftware.com (8 pages / 142 chunks, 5 answerable + 5 absent
- * questions), voyage-3-lite separates cleanly anywhere in 0.35-0.375, while the
- * 0.25 that suits text-embedding-3-small lets 4 of 5 absent questions through.
+ * It used to be expected to separate answerable questions from absent ones on
+ * its own. Re-measured on kleiosoftware.com (17 pages, 30+ questions), it
+ * cannot: with voyage-3-lite the chunk holding a one-line fact ranks first at
+ * 0.25-0.34, while absent questions that name the brand score up to 0.49. At
+ * 0.35 the landing-page index refused its own email address. So for voyage the
+ * floor is now 0.25 - low enough to let single-sentence facts through, high
+ * enough that plainly unrelated questions are still refused for free - and the
+ * model, shown the excerpts, decides the rest. `npm run eval` is what holds
+ * that line: every absent question must come back without a citation.
  * Re-measure before changing embedder; override with MIN_COSINE.
  */
 function defaultMinCosine(provider: string): number {
-  if (provider === 'voyage') return 0.35;
+  if (provider === 'voyage') return 0.25;
+  // bge-small-en-v1.5 packs everything into a narrow high band: the weakest
+  // real answer measured 0.479, the rest 0.535 and up, while questions no site
+  // like this answers ("what's the weather tomorrow?") land at 0.45-0.55. So
+  // almost every question reaches the model, which refuses what the excerpts
+  // do not answer; this floor only catches the most unrelated.
+  if (provider === 'local') return 0.45;
   // Provisional until `npm run eval` is run against this embedder: the floor is
   // a property of the model's cosine distribution and does not carry over.
   if (provider === 'gemini') return 0.5;
@@ -99,10 +112,18 @@ export const config = {
   // dateless alias `claude-haiku-4-5` resolve to Claude Haiku 4.5.
   chatModel: resolveChat().model,
 
-  embeddingProvider: embeddingProvider as 'openai' | 'voyage' | 'gemini' | 'hash',
+  embeddingProvider: embeddingProvider as 'openai' | 'voyage' | 'gemini' | 'local' | 'hash',
   openaiApiKey: str('OPENAI_API_KEY'),
   voyageApiKey: str('VOYAGE_API_KEY'),
   embeddingModel: str('EMBEDDING_MODEL', 'text-embedding-3-small'),
+  /**
+   * Where EMBEDDING_PROVIDER=local keeps its downloaded model. Next to the
+   * database by default, because that is the one directory the systemd unit
+   * lets the service write; transformers.js would otherwise try node_modules.
+   */
+  embeddingCacheDir: str('EMBEDDING_CACHE_DIR')
+    ? resolve(projectRoot, str('EMBEDDING_CACHE_DIR'))
+    : resolve(dirname(resolve(projectRoot, str('DATABASE_PATH', './data/sitechat.db'))), 'models'),
 
   ipHashSalt: str('IP_HASH_SALT', 'dev-salt-do-not-use-in-prod'),
   adminToken: str('ADMIN_TOKEN'),
@@ -146,8 +167,18 @@ export const config = {
   candidateK: 20,
   rrfK: 60,
   minCosine: num('MIN_COSINE', defaultMinCosine(embeddingProvider)),
-  minChunksForAnswer: 2,
+  // One. A fact a page states once - an email address, a call length - lives
+  // in exactly one chunk, and requiring a second refused it every time.
+  minChunksForAnswer: 1,
   embeddingDims: 1536,
+
+  /**
+   * Start a second identical chat request if the first has not responded
+   * within this long, and stream whichever answers first. About one Gemini
+   * call in twenty never returned headers at all, which left a visitor
+   * watching "writing an answer" for 30 seconds before an error. 0 disables.
+   */
+  chatHedgeMs: num('CHAT_HEDGE_MS', 4_000),
 
   // Defaults suit a paid provider tier and hit the time budget in §4. A
   // free/low-quota key needs smaller batches, no parallelism, and a gap between

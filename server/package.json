@@ -16,13 +16,12 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.71.0",
-    "@mozilla/readability": "^0.6.0",
+    "@huggingface/transformers": "^4.3.0",
     "better-sqlite3": "^12.2.0",
     "cheerio": "^1.1.2",
     "dotenv": "^17.2.1",
     "express": "^5.1.0",
     "fast-xml-parser": "^5.2.5",
-    "jsdom": "^26.1.0",
     "nanoid": "^5.1.5",
     "robots-parser": "^3.0.1",
     "tldts": "^7.0.0",
@@ -31,7 +30,6 @@
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/express": "^5.0.3",
-    "@types/jsdom": "^21.1.7",
     "@types/node": "^22.15.0",
     "tsx": "^4.20.3",
     "typescript": "^5.9.2",

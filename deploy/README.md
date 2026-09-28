@@ -35,10 +35,23 @@ origin.
 
 Running on the free-tier `e2-micro` (1 GB) with `CONCURRENT_CRAWLS=2`, not the
 `e2-small` this was first specced for. Memory is the ceiling: `CONCURRENT_CRAWLS`
-times `crawlConcurrency=6` is that many jsdom documents in flight, each parsing
-a body of up to 2 MB. At 3 the box would OOM; 2 fits inside 1 GB plus the 2 GB
-of swap `provision.sh` adds. **If crawls die partway on larger sites, drop it to
-1** — queued visitors then wait rather than fail.
+times `crawlConcurrency=6` is that many fetched bodies in flight, each up to
+2 MB. That limit was measured when pages were parsed through jsdom — at 3 the
+box would OOM; 2 fit inside 1 GB plus the 2 GB of swap `provision.sh` adds.
+Parsing is now cheerio, one page at a time and far lighter, so there is likely
+headroom, but re-measure before raising it. **If crawls die partway on larger
+sites, drop it to 1** — queued visitors then wait rather than fail.
+
+With `EMBEDDING_PROVIDER=local` the embedding model lives in the server
+process too: about 80 MB once loaded, plus up to about 100 MB of runtime
+arena while a large site is being embedded (measured on a 17-page site with
+one inference thread; it is held, not released). It adds roughly 470 MB to
+`node_modules` — mostly onnxruntime's prebuilt binaries for every platform —
+and downloads the 34 MB model into `/srv/sitechat/data/models` the first time
+the service starts; the boot log says `local model ready` when it has loaded.
+`install.sh` sets `ONNXRUNTIME_NODE_INSTALL=skip`, because onnxruntime's
+postinstall would otherwise fetch the CUDA runtime on linux/x64, which a
+CPU-only VM has no use for.
 
 Free tier is `us-west1` / `us-central1` / `us-east1` only, requires a *standard*
 persistent disk of at most 30 GB, and caps North America egress at 1 GB/month —

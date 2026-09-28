@@ -2,7 +2,7 @@ import express from 'express';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { config, resolveChat } from './config.js';
-import { resolveEmbedding } from './indexing/embed.js';
+import { getEmbedder, resolveEmbedding } from './indexing/embed.js';
 import { getDb, sweepExpired } from './db.js';
 import { router } from './http/routes.js';
 import { sweepJobs } from './http/jobs.js';
@@ -64,6 +64,16 @@ const server = app.listen(config.port, () => {
     config.ipHashSalt === 'dev-salt-do-not-use-in-prod' && 'IP_HASH_SALT (using dev default)',
   ].filter(Boolean);
   if (missing.length > 0) console.warn(`  ! not set: ${missing.join(', ')}`);
+
+  // A local model is downloaded on first use and takes a moment to load.
+  // Doing that now means the first visitor after a deploy does not wait for it.
+  if (embedding.provider === 'local') {
+    const started = Date.now();
+    getEmbedder().embed(['warm up'], 'query').then(
+      () => console.log(`  embeddings  local model ready in ${Date.now() - started}ms`),
+      (e: unknown) => console.error('  ! local embedding model failed to load:', e),
+    );
+  }
 });
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {

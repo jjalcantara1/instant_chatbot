@@ -6,6 +6,12 @@ export interface Chunk {
   /** What actually gets embedded: title + heading path prepended for topic anchoring. */
   embedText: string;
   headingPath: string;
+  /**
+   * The heading path of every section whose text is in this chunk, in page
+   * order. One entry unless small sections were packed together, in which case
+   * `headingPath` is only what they share and these are what they were.
+   */
+  headings: string[];
   tokens: number;
 }
 
@@ -14,6 +20,8 @@ const OVERLAP = 120;
 const MIN_CHUNK = 80;
 /** Chunks are only ever compared to each other, so a 4-chars-per-token estimate is fine. */
 export const estimateTokens = (s: string): number => Math.max(1, Math.round(s.length / 4));
+
+const segments = (path: string): string[] => path.split(' > ').filter(Boolean);
 
 /** Sentence-ending positions, so a chunk never breaks mid-sentence. */
 function sentenceEnds(text: string): number[] {
@@ -79,13 +87,84 @@ function splitBody(body: string): string[] {
   return out;
 }
 
+interface Packed extends Section {
+  headings: string[];
+}
+
+/** One section standing for a run of them: shared path, members' own headings inlined. */
+function merge(group: Section[]): Packed {
+  const first = group[0] as Section;
+  if (group.length === 1) return { headingPath: first.headingPath, text: first.text, headings: [first.headingPath] };
+
+  const paths = group.map((g) => segments(g.headingPath));
+  const lead = paths[0] as string[];
+  let shared = 0;
+  while (shared < lead.length && paths.every((p) => p[shared] === lead[shared])) shared++;
+
+  const text = group.map((g, i) => {
+    const own = (paths[i] as string[]).slice(shared).join(' > ');
+    return own ? `${own}\n${g.text}` : g.text;
+  }).join('\n');
+
+  return { headingPath: lead.slice(0, shared).join(' > '), text, headings: group.map((g) => g.headingPath) };
+}
+
+/**
+ * Merge runs of small sections under the same parent heading into one.
+ *
+ * Landing pages are built from cards: a services grid, case-study tiles,
+ * process steps, contact details, each one a heading and a line or two. On
+ * their own most fall under the 80-character floor below and are dropped, so
+ * the page's most specific facts - an email address, "a 15 to 45 minute
+ * call", what each service is - never reached the index. Packed together
+ * they survive, and a single chunk answers "what services do you offer?".
+ *
+ * Runs never cross into a different parent: sections belong together when
+ * they share every heading level but the page's deepest one, so the cards of
+ * one section join their intro but not the next section's.
+ */
+export function packSections(sections: Section[]): Packed[] {
+  const depth = Math.max(0, ...sections.map((s) => segments(s.headingPath).length));
+  const parentOf = (path: string): string => segments(path).slice(0, Math.max(0, depth - 1)).join(' > ');
+
+  const out: Packed[] = [];
+  let group: Section[] = [];
+  let size = 0;
+  let parent = '';
+
+  const emit = (): void => {
+    if (group.length > 0) out.push(merge(group));
+    group = [];
+    size = 0;
+  };
+
+  for (const s of sections) {
+    const text = s.text.trim();
+    if (!text) continue;
+    if (text.length >= TARGET) {
+      emit();
+      out.push({ headingPath: s.headingPath, text, headings: [s.headingPath] });
+      continue;
+    }
+    // The member's own heading is inlined when packed, so it counts too.
+    const cost = text.length + (segments(s.headingPath).pop()?.length ?? 0) + 2;
+    const p = parentOf(s.headingPath);
+    if (group.length > 0 && (p !== parent || size + cost > TARGET)) emit();
+    if (group.length === 0) parent = p;
+    group.push({ headingPath: s.headingPath, text });
+    size += cost;
+  }
+  emit();
+  return out;
+}
+
 export function chunkPage(
   pageTitle: string,
   sections: Section[],
 ): Chunk[] {
   const chunks: Chunk[] = [];
 
-  for (const section of sections) {
+  for (const section of packSections(sections)) {
     for (const piece of splitBody(section.text)) {
       const text = piece.trim();
       if (text.length < MIN_CHUNK) continue;
@@ -99,6 +178,7 @@ export function chunkPage(
         text,
         embedText,
         headingPath: section.headingPath,
+        headings: section.headings,
         tokens: estimateTokens(text),
       });
     }

@@ -42,7 +42,8 @@ CREATE TABLE IF NOT EXISTS chunks (
   heading_path TEXT,
   text         TEXT NOT NULL,
   tokens       INTEGER NOT NULL,
-  embedding    BLOB NOT NULL
+  embedding    BLOB NOT NULL,
+  headings     TEXT
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -99,15 +100,32 @@ const SESSION_COLUMNS: Array<[string, string]> = [
   // the empty array ("computed, nothing survived") - the client shows a
   // pending state for one and nothing at all for the other.
   ['starters', 'TEXT'],
+  // The embedding model that indexed this session. Vectors from different
+  // models cannot be compared, so a session outliving a change of model must
+  // be refused rather than silently searched with the wrong geometry.
+  ['embedding_model', 'TEXT'],
 ];
 
-function migrate(db: Database.Database): void {
+const CHUNK_COLUMNS: Array<[string, string]> = [
+  // JSON array of the heading paths packed into this chunk. `heading_path` is
+  // only what they share, so this is where suggested questions find the
+  // headings of the individual cards and steps. NULL on older rows, which
+  // means "just heading_path".
+  ['headings', 'TEXT'],
+];
+
+function addMissingColumns(db: Database.Database, table: string, columns: Array<[string, string]>): void {
   const existing = new Set(
-    (db.pragma('table_info(sessions)') as Array<{ name: string }>).map((c) => c.name),
+    (db.pragma(`table_info(${table})`) as Array<{ name: string }>).map((c) => c.name),
   );
-  for (const [name, decl] of SESSION_COLUMNS) {
-    if (!existing.has(name)) db.exec(`ALTER TABLE sessions ADD COLUMN ${name} ${decl}`);
+  for (const [name, decl] of columns) {
+    if (!existing.has(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${decl}`);
   }
+}
+
+function migrate(db: Database.Database): void {
+  addMissingColumns(db, 'sessions', SESSION_COLUMNS);
+  addMissingColumns(db, 'chunks', CHUNK_COLUMNS);
 }
 
 export type DB = Database.Database;

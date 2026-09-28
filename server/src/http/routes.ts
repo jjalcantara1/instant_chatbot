@@ -1,6 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import { config, resolveChat } from '../config.js';
-import { resolveEmbedding } from '../indexing/embed.js';
+import { getEmbedder, resolveEmbedding } from '../indexing/embed.js';
+import { indexedWithAnotherModel } from '../retrieve/retrieve.js';
 import { getDb } from '../db.js';
 import { openSse } from './sse.js';
 import {
@@ -53,6 +54,19 @@ function headroom(session: SessionRow): number {
 
 function loadSession(id: string): SessionRow | undefined {
   return getDb().prepare('SELECT * FROM sessions WHERE id = ?').get(id) as SessionRow | undefined;
+}
+
+/**
+ * Indexed by a different embedding model than the current one - a session
+ * that outlived a change of EMBEDDING_PROVIDER. An embedder that cannot even
+ * be built (a missing key) is left for the answer path to report.
+ */
+function isStale(id: string): boolean {
+  try {
+    return indexedWithAnotherModel(getDb(), id, getEmbedder());
+  } catch {
+    return false;
+  }
 }
 
 /** Widget embeds run on arbitrary origins; the session id is the only credential. */
@@ -347,6 +361,13 @@ router.post('/api/sessions/:id/messages', async (req: Request, res: Response) =>
     res.status(409).json({ code: 'NOT_READY', message: 'This site is still being indexed.' });
     return;
   }
+  if (isStale(id)) {
+    res.status(409).json({
+      code: 'STALE_INDEX',
+      message: 'This chat was indexed with a search model the demo no longer uses, so its answers would not be reliable. Index the site again to keep chatting.',
+    });
+    return;
+  }
 
   const ip = clientIp(req);
   const limit = peekRateLimit(ip, 'message', config.messagesPerIpPerHour);
@@ -470,6 +491,8 @@ router.get('/admin/stats', (req: Request, res: Response) => {
     'text-embedding-3-small': { in: 0.02 / M, out: 0 },
     'voyage-3-lite': { in: 0.02 / M, out: 0 },
     'hash-dev': { in: 0, out: 0 },
+    // Runs on this box: it costs CPU and memory, not money.
+    'Xenova/bge-small-en-v1.5': { in: 0, out: 0 },
     'claude-haiku-4-5': { in: 1 / M, out: 5 / M },
     'claude-haiku-4-5-20251001': { in: 1 / M, out: 5 / M },
     'gemini-3.5-flash-lite': { in: 0.30 / M, out: 2.50 / M },
