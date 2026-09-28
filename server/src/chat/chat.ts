@@ -17,7 +17,7 @@ export type ChatEvent =
   | { type: 'status'; stage: 'retrieving' | 'generating' }
   | { type: 'token'; text: string }
   | { type: 'sources'; sources: ChatSource[] }
-  | { type: 'done'; inputTokens: number; outputTokens: number }
+  | { type: 'done'; inputTokens: number; outputTokens: number; model?: string }
   | { type: 'error'; message: string };
 
 function buildSystemPrompt(domain: string, chunks: RetrievedChunk[]): string {
@@ -194,6 +194,7 @@ export async function* streamAnswer(opts: AnswerOptions): AsyncGenerator<ChatEve
   let full = '';
   let inputTokens = 0;
   let outputTokens = 0;
+  let answeredBy: string | undefined;
 
   // A reply that opens by declining is a refusal, and a refusal cites nothing.
   // The prompt says so, and the model still sometimes declines and then
@@ -219,6 +220,7 @@ export async function* streamAnswer(opts: AnswerOptions): AsyncGenerator<ChatEve
       if (next.done) {
         inputTokens = next.value.inputTokens;
         outputTokens = next.value.outputTokens;
+        answeredBy = next.value.model;
         break;
       }
       full += next.value;
@@ -254,5 +256,5 @@ export async function* streamAnswer(opts: AnswerOptions): AsyncGenerator<ChatEve
   if (tail) yield { type: 'token', text: tail };
 
   yield { type: 'sources', sources: refusing ? [] : parseCitations(full, result.chunks) };
-  yield { type: 'done', inputTokens, outputTokens };
+  yield { type: 'done', inputTokens, outputTokens, ...(answeredBy ? { model: answeredBy } : {}) };
 }

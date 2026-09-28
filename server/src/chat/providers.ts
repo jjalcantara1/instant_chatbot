@@ -1,5 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { request } from 'undici';
+import { request, type Dispatcher } from 'undici';
 import { config, resolveChat } from '../config.js';
 
 export interface ChatTurn {
@@ -10,6 +10,8 @@ export interface ChatTurn {
 export interface ChatUsage {
   inputTokens: number;
   outputTokens: number;
+  /** The model that actually answered, when it can differ from the configured one. */
+  model?: string;
 }
 
 export interface ChatRequest {
@@ -123,15 +125,84 @@ interface GeminiChunk {
   error?: { message?: string };
 }
 
+/** Gemini's "try again": overloaded, or a gateway hiccup. */
+const TRANSIENT = new Set([500, 502, 503, 504]);
+
+/** Pause before asking an overloaded model a second time. */
+export const RETRY_PAUSE_MS = 800;
+
+/** How long the fallback goes first after the primary proved overloaded. */
+const BUSY_FOR_MS = 60_000;
+
 class GeminiChat implements ChatModel {
   readonly provider = 'gemini';
+  private busyUntil = 0;
 
-  constructor(private readonly apiKey: string, readonly name: string) {}
+  constructor(
+    private readonly apiKey: string,
+    readonly name: string,
+    /** Tried when the primary is overloaded or out of quota. Null: none. */
+    private readonly fallback: string | null = null,
+  ) {}
+
+  /**
+   * Open a streaming response, riding out an overloaded model.
+   *
+   * Gemini answers "503: This model is currently experiencing high demand"
+   * in bursts that last minutes, and while it does, every question failed.
+   * So a transient error on the primary model is retried once after a short
+   * pause, and if the primary is still overloaded - or has spent its free-tier
+   * quota, which is counted per model - the fallback model gets the question.
+   * Nothing has been streamed to the visitor yet, so switching is invisible.
+   * Anything else (a bad key, a bad request) fails at once: another model
+   * would not fix it.
+   */
+  private async open(body: string): Promise<{ res: Dispatcher.ResponseData; model: string }> {
+    const hasFallback = this.fallback !== null && this.fallback !== this.name;
+    // A spike lasts minutes, and an overloaded answer still takes a second or
+    // three to arrive. Once the primary has proved overloaded, the fallback
+    // goes first for a while instead of every question paying for the primary
+    // twice before being handed over.
+    const primaryBusy = hasFallback && Date.now() < this.busyUntil;
+    const models = !hasFallback ? [this.name]
+      : primaryBusy ? [this.fallback as string, this.name]
+      : [this.name, this.fallback as string];
+    let failure = '';
+
+    for (const [m, model] of models.entries()) {
+      const url = `${config.geminiBaseUrl}/v1beta/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`;
+      const retry = m === 0 && !primaryBusy;
+      for (let attempt = 0; attempt < (retry ? 2 : 1); attempt++) {
+        // Most calls start streaming in about a second, but roughly one in
+        // twenty sends no headers at all until the timeout. A second request
+        // started after CHAT_HEDGE_MS turns that 30-second wait and error into
+        // a few seconds' delay, for the cost of an occasional duplicate prompt.
+        const res = await hedge(
+          (signal) => request(url, {
+            method: 'POST',
+            headers: { 'x-goog-api-key': this.apiKey, 'content-type': 'application/json' },
+            body,
+            signal,
+            headersTimeout: 30_000,
+            bodyTimeout: 120_000,
+          }),
+          config.chatHedgeMs,
+          (late) => { late.body.destroy(); },
+        );
+        if (res.statusCode < 400) return { res, model };
+
+        failure = `Gemini returned ${res.statusCode}: ${(await res.body.text()).slice(0, 400)}`;
+        if (!TRANSIENT.has(res.statusCode) && res.statusCode !== 429) throw new Error(failure);
+        if (model === this.name) this.busyUntil = Date.now() + BUSY_FOR_MS;
+        // A quota error will not clear in a second; go straight to the fallback.
+        if (res.statusCode === 429) break;
+        if (retry && attempt === 0) await new Promise((r) => setTimeout(r, RETRY_PAUSE_MS));
+      }
+    }
+    throw new Error(failure);
+  }
 
   async *stream(req: ChatRequest): AsyncGenerator<string, ChatUsage> {
-    const url =
-      `${config.geminiBaseUrl}/v1beta/models/${encodeURIComponent(this.name)}` +
-      ':streamGenerateContent?alt=sse';
     const body = JSON.stringify({
       // Gemini names the assistant role "model"; everything else maps over.
       contents: req.messages.map((m) => ({
@@ -142,32 +213,9 @@ class GeminiChat implements ChatModel {
       generationConfig: { maxOutputTokens: req.maxTokens },
     });
 
-    // Most calls start streaming in about a second, but roughly one in twenty
-    // sends no headers at all until the timeout. A second request started
-    // after CHAT_HEDGE_MS turns that 30-second wait and error into a few
-    // seconds' delay, for the cost of an occasional duplicate prompt.
-    const res = await hedge(
-      (signal) => request(url, {
-        method: 'POST',
-        headers: {
-          'x-goog-api-key': this.apiKey,
-          'content-type': 'application/json',
-        },
-        body,
-        signal,
-        headersTimeout: 30_000,
-        bodyTimeout: 120_000,
-      }),
-      config.chatHedgeMs,
-      (late) => { late.body.destroy(); },
-    );
+    const { res, model } = await this.open(body);
 
-    if (res.statusCode >= 400) {
-      const body = await res.body.text();
-      throw new Error(`Gemini returned ${res.statusCode}: ${body.slice(0, 400)}`);
-    }
-
-    let usage: ChatUsage = { inputTokens: 0, outputTokens: 0 };
+    let usage: ChatUsage = { inputTokens: 0, outputTokens: 0, model };
     let buffer = '';
 
     // SSE frames can split across network chunks, so hold a partial line back
@@ -198,6 +246,7 @@ class GeminiChat implements ChatModel {
           usage = {
             inputTokens: chunk.usageMetadata.promptTokenCount ?? 0,
             outputTokens: chunk.usageMetadata.candidatesTokenCount ?? 0,
+            model,
           };
         }
       }
@@ -215,7 +264,7 @@ export function getChatModel(): ChatModel {
 
   if (provider === 'gemini') {
     if (!config.geminiApiKey) throw new Error('GEMINI_API_KEY is not set.');
-    cached = new GeminiChat(config.geminiApiKey, model);
+    cached = new GeminiChat(config.geminiApiKey, model, config.chatFallbackModel || null);
     return cached;
   }
 

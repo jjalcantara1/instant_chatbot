@@ -318,7 +318,17 @@ export function pairedHistory(
  * again" when the next attempt is also rate limited just wastes their patience.
  * Name what happened and what to do about it.
  */
-function chatError(detail: string, partial: boolean): { code: string; message: string } {
+export function chatError(detail: string, partial: boolean): { code: string; message: string } {
+  // Checked first: an overload is not the visitor's rate limit, and saying
+  // "could not be started" about it points them at the wrong thing.
+  if (/\b50[0234]\b|UNAVAILABLE|high demand|overloaded/i.test(detail)) {
+    return {
+      code: 'MODEL_BUSY',
+      message: partial
+        ? 'The answer stopped partway through because the AI model is overloaded right now, which is on Google’s side. Try again in a minute.'
+        : 'The AI model is overloaded right now, which is on Google’s side, not a problem with your site. Try again in a minute.',
+    };
+  }
   if (/429|rate limit|quota|RESOURCE_EXHAUSTED/i.test(detail)) {
     return {
       code: 'RATE_LIMITED',
@@ -441,7 +451,7 @@ router.post('/api/sessions/:id/messages', async (req: Request, res: Response) =>
           .run(id, 'assistant', answer, Date.now());
         db.prepare(
           'INSERT INTO usage_log (session_id, kind, model, input_tokens, output_tokens, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-        ).run(id, 'chat', config.chatModel, event.inputTokens, event.outputTokens, Date.now());
+        ).run(id, 'chat', event.model ?? config.chatModel, event.inputTokens, event.outputTokens, Date.now());
         channel.send('done', { messagesUsed: used + 1, messagesAllowed: config.maxMessagesPerSession });
       } else if (event.type === 'error') {
         // The visitor gets a plain message; the operator gets the real cause.

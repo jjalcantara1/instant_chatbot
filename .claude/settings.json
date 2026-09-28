@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(VM=sitechat ZONE=us-central1-a ./deploy/deploy.sh)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(break)",
+      "Bash(grep -v '^$' C:/Users/Jodi/AppData/Local/Temp/claude/c--Users-Jodi-Documents-Code-instant-chatbot/863e9aa6-1831-438a-874b-e9d794ade3f1/scratchpad/deploy.log)",
+      "Bash(timeout 180 gcloud compute ssh sitechat --zone us-central1-a --quiet --command \"sudo cp /srv/sitechat/.env /srv/sitechat/.env.bak-voyage && sudo sed -i -e 's/^EMBEDDING_PROVIDER=.*/EMBEDDING_PROVIDER=local/' -e 's/^EMBEDDING_MODEL=.*/EMBEDDING_MODEL=/' -e 's/^EMBEDDING_BATCH_SIZE=.*/EMBEDDING_BATCH_SIZE=32/' -e 's/^EMBEDDING_MIN_INTERVAL_MS=.*/EMBEDDING_MIN_INTERVAL_MS=0/' /srv/sitechat/.env && sudo grep -E '^EMBEDDING_' /srv/sitechat/.env && sudo systemctl restart sitechat && for i in \\\\$\\(seq 1 30\\); do sudo journalctl -u sitechat -n 20 --no-pager | grep -q 'local model ready\\\\|failed to load' && break; sleep 2; done; sudo journalctl -u sitechat -n 8 --no-pager -o cat; free -m | head -3; ps -o rss=,cmd= -C node; sudo ls -la /srv/sitechat/data/models/Xenova/bge-small-en-v1.5/onnx/ 2>&1 | tail -1\")",
+      "Bash(BASE=https://sitechat.kleiosoftware.com timeout 120 npx tsx \"C:/Users/Jodi/AppData/Local/Temp/claude/c--Users-Jodi-Documents-Code-instant-chatbot/863e9aa6-1831-438a-874b-e9d794ade3f1/scratchpad/e2e-index-only.mts\" https://kleiosoftware.com)",
+      "Bash(timeout 120 gcloud compute ssh sitechat --zone us-central1-a --quiet --command \"sudo journalctl -u sitechat --since '-30 min' --no-pager -o cat | tail -40\")",
+      "Bash(timeout 200 npx vitest run)",
+      "Bash(VM=sitechat ZONE=us-central1-a timeout 580 ./deploy/deploy.sh)",
+      "Bash(BASE=https://sitechat.kleiosoftware.com timeout 150 npx tsx \"C:/Users/Jodi/AppData/Local/Temp/claude/c--Users-Jodi-Documents-Code-instant-chatbot/863e9aa6-1831-438a-874b-e9d794ade3f1/scratchpad/e2e.mts\" https://kleiosoftware.com)",
+      "Read(//c/Users/Jodi/Documents/Code/**)",
+      "Bash(timeout 90 gcloud compute ssh sitechat --zone us-central1-a --quiet --command \"sudo journalctl -u sitechat --since '-5 min' --no-pager -o cat | tail -8; sudo sqlite3 /srv/sitechat/data/sitechat.db \\\\\"SELECT model, created_at FROM usage_log WHERE kind='chat' ORDER BY id DESC LIMIT 1\\\\\" 2>&1\")"
+    ]
+  }
+}

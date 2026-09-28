@@ -179,6 +179,16 @@ export const config = {
    * watching "writing an answer" for 30 seconds before an error. 0 disables.
    */
   chatHedgeMs: num('CHAT_HEDGE_MS', 4_000),
+  /**
+   * Asked when the chat model is overloaded ("503: high demand") or out of
+   * quota. A different generation is the point: a demand spike hits a model
+   * family at once, and free-tier quotas are counted per model. `none`
+   * disables it; a model from the other provider is ignored.
+   */
+  chatFallbackModel: (() => {
+    const v = str('CHAT_FALLBACK_MODEL', chatProvider === 'gemini' ? 'gemini-3.1-flash-lite' : '');
+    return v === 'none' || !v.startsWith(chatProvider === 'gemini' ? 'gemini' : 'claude') ? '' : v;
+  })(),
 
   // Defaults suit a paid provider tier and hit the time budget in §4. A
   // free/low-quota key needs smaller batches, no parallelism, and a gap between

@@ -796,6 +796,18 @@ request has sent nothing back after `CHAT_HEDGE_MS` (4 s), an identical second
 one starts and whichever answers first is streamed; the other is cancelled. A
 fast error still wins the race and is reported as before.
 
+Gemini also answers **"503: This model is currently experiencing high demand"**
+in spikes that last minutes — on the day this shipped, every question failed
+through one. So an overloaded model is retried once after a short pause, and if
+it is still overloaded, or has spent its free-tier quota (counted per model),
+the question goes to `CHAT_FALLBACK_MODEL`, `gemini-3.1-flash-lite` by default:
+another generation, since a spike hits a whole model family at once. Nothing
+has been streamed yet, so the switch is invisible. After an overload the
+fallback goes first for a minute, rather than every question paying for the
+busy model twice. Usage is logged against the model that actually answered,
+and if both fail the visitor is told the model is overloaded, not that the
+answer "could not be started".
+
 `ANTHROPIC_WORKSPACE_ID` is only needed for an identity-linked Anthropic key,
 which rejects every request without it. `GEMINI_BASE_URL` overrides the Gemini
 endpoint, for a proxy or for tests.
@@ -824,6 +836,7 @@ endpoint, for a proxy or for tests.
 | `DAILY_INDEX_CAP` | `200` | Global. |
 | `MIN_COSINE` | per provider | Retrieval floor. Set only to override. |
 | `CHAT_HEDGE_MS` | `4000` | Start a second chat request if the first is silent this long. `0` disables. |
+| `CHAT_FALLBACK_MODEL` | `gemini-3.1-flash-lite` | Answers when the chat model is overloaded or out of quota. `none` disables. |
 
 An unbilled Voyage key — 3 requests and 10,000 tokens a minute — needs
 `16 / 1 / 21000` for the three embedding variables
@@ -856,7 +869,7 @@ npm --workspace server run index-site -- URL  # crawl + chunk + embed into SQLit
 npm --workspace server run dump -- SESSION_ID # print a session's chunks to read
 npm run eval                                  # the honesty gate, whole site
 npm run eval -- --fixture eval/fixtures/kleiosoftware-landing.json   # the default index
-npm test                                      # 146 tests
+npm test                                      # 152 tests
 ```
 
 `npm run crawl` reports the frontier, which is the fastest way to see what a
@@ -966,7 +979,7 @@ Type is [Archivo](https://fonts.google.com/specimen/Archivo) (OFL).
 ## Testing
 
 ```bash
-npm test          # 146 tests, no API key required
+npm test          # 152 tests, no API key required
 npm run eval      # honesty and answers against real models — needs keys
 ```
 
@@ -984,7 +997,7 @@ npm run eval      # honesty and answers against real models — needs keys
 | `chat-stream.test.ts` | 6 | A reply that opens by declining loses every citation, even split across stream pieces; answers stream untouched |
 | `hedge.test.ts` | 5 | A silent chat request is raced by a second; the loser is cancelled; fails only when both do |
 | `refusal-text.test.ts` | 4 | Refusals offer verified questions, never page titles, and carry no citation markers |
-| `gemini-stream.test.ts` | 3 | SSE frames split across network chunks |
+| `gemini-stream.test.ts` | 9 | SSE frames split across network chunks; an overloaded model retried, then handed to the fallback, which goes first for a minute; quota goes straight to the fallback; a bad request does not; the overload message |
 
 The tests that matter most are the ones asserting things the product would
 quietly survive being wrong about: that a refusal never cites a page, that an
